@@ -6,7 +6,7 @@ Readback reads your git diff and a small map of your product (`.readback/map.jso
 board: which **features** and **parts** changed, which of them were in the plan, and who has to act.
 
 ```
-Readback · Shringar · DONE · Features · Money
+Readback · Shopfront · What changed · Features · Money
 ──────────────────────────────────────────────
 Bag and offers ① touches money.
 
@@ -26,15 +26,15 @@ Bag and offers ① touches money.
 /readback init        # drafts .readback/map.json - review the tile names, commit it
 ```
 
-Needs Python 3.8+ and git. No other dependencies.
+Needs Python 3.8+ (found as `python3`, `python` or `py`) and git. No other dependencies.
 
 ## What happens automatically
 
 | When | What Readback does |
 |---|---|
 | You send the first message of a session | Keeps it as context only (an opening question is not a plan, so no flags) |
-| You approve a plan (plan mode) | Claude maps the plan to tiles (`rb.py plan --tiles sure --maybe unsure`) and shows the PLAN board before editing. If there are maybe tiles, or a tile that usually changes with a planned one, it asks you once and then records the final list |
-| Claude is about to make its first edit with no mapped plan (you skipped plan mode, or a headless `claude -p` run) | Holds that one edit and asks Claude which tiles the change will touch (`--source intent`), then shows the same PLAN board and question. Once per session |
+| You approve a plan (plan mode) | Claude maps the plan to tiles (`rb.py plan --tiles sure --maybe unsure`) and shows the "About to change" board before editing. If there are maybe tiles, or a tile that usually changes with a planned one, it asks you once and then records the final list |
+| Claude is about to make its first edit with no mapped plan (you skipped plan mode, or a headless `claude -p` run) | Holds that one edit and asks Claude which tiles the change will touch (`--source intent`), then shows the same "About to change" board and question. Once per session |
 | Claude stops and the diff changed | Shows the board once (silent if nothing new changed) |
 
 ## On demand
@@ -46,7 +46,7 @@ Needs Python 3.8+ and git. No other dependencies.
 /readback --format md             paste into a PR description
 /readback --format html           shareable page in .readback/board.html
 /readback check                   coverage, then asks who owns shared files and widgets
-/readback plan                    map the current plan to tiles and draw the PLAN board
+/readback plan                    map the current plan to tiles and draw the "About to change" board
 /readback stats                   how plans held up: your answers to the plan questions, plan vs done
 ```
 
@@ -64,7 +64,7 @@ tiles with `"audience": "internal"` in the map.
 
 ## How well the plan held up
 
-Each mapped plan, your answers to its questions, and the latest DONE board for it go to
+Each mapped plan, your answers to its questions, and the latest "What changed" board for it go to
 `.readback/log.jsonl`. The file holds tile ids and counts only (no code, no plan text), stays on
 your machine and is gitignored. `/readback stats` reads it: how many maybe tiles you kept, how
 many "usually changes with" tiles you took, how often you corrected a plan (dropped a sure tile or
