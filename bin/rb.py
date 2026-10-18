@@ -1315,7 +1315,7 @@ def map_request(m, source="plan"):
             "tiles you are only partly sure of in --maybe:\n" + tile_list(m) +
             "\nThen run: python \"" + os.path.abspath(__file__) + "\" plan --tiles id1,id2 --maybe id3" +
             (" --source intent" if source == "intent" else "") + "  "
-            "and show the user the PLAN board it prints, in a code block. If it has maybe tiles or a "
+            "and show the user the PLAN board it prints, unchanged (every line), in a code block. If it has maybe tiles or a "
             "'usually changes with' question, ask the user once which to include, then run plan --tiles again "
             "with the final list (no --maybe" + (", same --source" if source == "intent" else "") + ") before editing. Otherwise carry on.")
 
