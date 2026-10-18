@@ -8,8 +8,8 @@ One model, many surfaces. Every command reads the repo's map
   rb.py show [RANGE] [--level L] [--lens X] [--as ROLE] [--format term|md|slack|html|json|trailer|line]
                                     [--expected a,b] [--plan TEXT|-]   (PR body with a Readback-Plan: line)
   rb.py plan --tiles a,b [--maybe c] [--source plan|pr] [--format term|html|json] [--out F]
-                                    Claude's mapping of a real plan to tiles; draws the PLAN board
-  rb.py plan --show [--format ...]  the stored PLAN board again
+                                    Claude's mapping of a real plan to tiles; draws the "About to change" board
+  rb.py plan --show [--format ...]  the stored "About to change" board again
   rb.py stats [--format json]       how plans held up: answers to the plan questions, plan vs done
   rb.py check                       validate the map; list the largest shared files to assign
   rb.py own PATH FEATURE|shared [--by a,b|all]   record who owns a shared file (and who uses it)
@@ -27,6 +27,8 @@ except Exception:
 LEVELS = ["features", "parts"]
 LENSES = ["change", "risk", "money", "owner"]
 DISC = "①②③④⑤"
+# What each board is called on screen. The JSON "phase" field keeps PLAN / DONE.
+PHASE_LABEL = {"PLAN": "About to change", "DONE": "What changed"}
 # A plan is Claude's own mapping: after ExitPlanMode, from a PR body, or of its intent right before
 # its first edit. The opening question is never a plan. Plan-mode and PR plans last for the branch;
 # an intent mapping belongs to the session that made it.
@@ -49,7 +51,8 @@ FEATURE_ROOTS = ["lib/features", "lib/screens", "lib/pages", "src/features", "sr
 
 # ---------------------------------------------------------------- git
 def git(args, cwd=None, check=False):
-    r = subprocess.run(["git"] + args, cwd=cwd, capture_output=True, text=True, encoding="utf-8", errors="replace")
+    # quotepath off: non-ASCII paths come back as text, not "\303\274"-quoted
+    r = subprocess.run(["git", "-c", "core.quotepath=off"] + args, cwd=cwd, capture_output=True, text=True, encoding="utf-8", errors="replace")
     if check and r.returncode:
         raise SystemExit("git " + " ".join(args) + ": " + r.stderr.strip())
     return r.stdout if r.returncode == 0 else ""
@@ -87,9 +90,12 @@ def new_lines(p):
 def diff_files(rng=None):
     """Return {path: lines_changed}. rng None = branch work + uncommitted."""
     if rng:
-        if ".." not in rng and not rng.startswith("#"):
-            rng = rng + "^.." + rng  # single commit
-        out = git(["diff", "--numstat", "-M", rng])
+        if ".." not in rng and not rng.startswith("#") and not git(["rev-parse", "--verify", "--quiet", rng + "^"]).strip():
+            out = git(["show", "--numstat", "--format=", "-M", rng])  # the first commit has no parent
+        else:
+            if ".." not in rng and not rng.startswith("#"):
+                rng = rng + "^.." + rng  # single commit
+            out = git(["diff", "--numstat", "-M", rng])
     else:
         base = base_ref()
         out = git(["diff", "--numstat", "-M", base])
@@ -647,7 +653,7 @@ def bar(n, w=6):
 
 def render_term(b, width=80):
     L = []
-    head = "Readback · " + b["product"] + " · " + b["phase"] + " · " + b["level"].title() + " · " + b["lens"].title()
+    head = "Readback · " + b["product"] + " · " + PHASE_LABEL.get(b["phase"], b["phase"]) + " · " + b["level"].title() + " · " + b["lens"].title()
     L.append(head[:width])
     L.append("─" * min(width, 78))
     for line in wrap(b["sentence"], width):
@@ -683,9 +689,9 @@ def render_term(b, width=80):
             L.append(("   ● " + a["who"] + ": " + a["do"])[:width])
     if b["unmapped"]:
         if b["level"] == "features":
-            L.append(("   + " + str(len(b["unmapped"])) + " shared files (no single feature)")[:width])
+            L.append(("   + " + plural(len(b["unmapped"]), "shared file") + " (no single feature)")[:width])
         else:
-            L.append(("   ? " + str(len(b["unmapped"])) + " files not on the map - run /readback check")[:width])
+            L.append(("   ? " + plural(len(b["unmapped"]), "file") + " not on the map - run /readback check")[:width])
     if b["phase"] == "PLAN":
         L.append("   key: ◯ will change ◌ maybe, confirm ①②③ in sentence")
     else:
@@ -704,11 +710,12 @@ def render_line(b):
         return "Readback: no product change (" + b["kind"] + ")  (/readback to see the board)"
     t = [x for x in b["tiles"] if x["touched"] and not x.get("brushed")]
     un = sum(1 for x in b["tiles"] if x["unplanned"])
-    s = "Readback: " + str(len(t)) + " " + b["level"] + " touched"
+    s = "Readback: " + plural(len(t), b["level"][:-1]) + " touched"
     if un:
         s += " · " + str(un) + " unplanned"
     if b["acts"]:
-        s += " · " + str(len(set(a["who"] for a in b["acts"]))) + " people act"
+        n = len(set(a["who"] for a in b["acts"]))
+        s += " · " + ("1 person acts" if n == 1 else str(n) + " people act")
     return s + "  (/readback to see the board)"
 
 
@@ -823,7 +830,7 @@ def render_html(boards, atl=None):
     b = boards[0]
     parts = ['<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">',
              "<title>Readback board</title><style>" + CSS + "</style></head><body><main>",
-             '<div class="who">Readback · ' + html.escape(b["product"]) + " · " + b["phase"] + "</div>",
+             '<div class="who">Readback · ' + html.escape(b["product"]) + " · " + PHASE_LABEL.get(b["phase"], b["phase"]) + "</div>",
              "<h1>" + html.escape(b["sentence"]) + "</h1>"]
     for bb in boards:
         parts.append('<section class="card"><div class="who">' + bb["level"].title() + " · " + bb["lens"].title() + "</div>")
@@ -999,7 +1006,7 @@ def cmd_stats(argv):
     if args_get(argv, "--format") == "json":
         print(json.dumps(o, indent=1))
         return
-    L = ["Readback stats · " + plural(o["plans"], "plan") + " · %d asked questions · %d finished with a product change" % (o["asked"], o["done"]),
+    L = ["Readback stats · " + plural(o["plans"], "plan") + " · %d with questions · %d finished with a product change" % (o["asked"], o["done"]),
          "─" * 78, "Plan questions (your answers before coding)",
          "  Maybe tiles you kept           " + pct(o["maybe_kept"], o["maybe_asked"]),
          "  'Usually changes with' taken   " + pct(o["couple_yes"], o["couple_asked"]),
@@ -1062,6 +1069,13 @@ def cmd_show(argv):
         elif a in LENSES:
             lens = a; pos.remove(a)
     rng = pos[0] if pos else None
+    if level not in LEVELS or lens not in LENSES:
+        print("Readback: levels are " + ", ".join(LEVELS) + "; lenses are " + ", ".join(LENSES) + ".")
+        return
+    if rng and not rng.startswith("#") and any(s and not git(["rev-parse", "--verify", "--quiet", s + "^{commit}"]).strip()
+                                               for s in re.split(r"\.\.\.?", rng)):
+        print("Readback: no commit or range called '" + rng + "' (levels: " + ", ".join(LEVELS) + "; lenses: " + ", ".join(LENSES) + ").")
+        return
     run = {} if rng else load_run(root)
     plan = args_get(argv, "--plan")
     if plan:  # a PR body: flags only if Claude left a Readback-Plan line in it
@@ -1104,7 +1118,7 @@ def cmd_init(argv):
     gi = os.path.join(root, ".readback", ".gitignore")
     with open(gi, "w") as f:
         f.write("runs/\nlog.jsonl\n")
-    print("Drafted .readback/map.json: %d features, %d parts." % (len(m["levels"]["features"]["tiles"]), len(m["levels"]["parts"]["tiles"])))
+    print("Drafted .readback/map.json: %s, %s." % (plural(len(m["levels"]["features"]["tiles"]), "feature"), plural(len(m["levels"]["parts"]["tiles"]), "part")))
     print(cmd_check([], quiet=True))
 
 
@@ -1266,8 +1280,8 @@ def plan_boards(m, run):
 
 def cmd_plan(argv):
     """rb.py plan --tiles a,b [--maybe c,d] [--source plan|pr] [--format term|html|json] [--out FILE]
-                                                Claude's mapping of the plan; prints the PLAN board
-       rb.py plan --show [--format ...]         the stored PLAN board again
+                                                Claude's mapping of the plan; prints the 'About to change' board
+       rb.py plan --show [--format ...]         the stored "About to change" board again
        rb.py plan TEXT|-                        store the text; Claude still has to map it"""
     root = repo_root()
     os.chdir(root)
@@ -1281,6 +1295,10 @@ def cmd_plan(argv):
     tl = args_get(argv, "--tiles")
     if tl is not None or "--show" in argv:
         split = lambda s: [x for x in (s or "").split(",") if x.strip()]
+        known = {k.lower() for lv in LEVELS for t in m["levels"][lv]["tiles"] for k in (t["id"], t["name"])}
+        unknown = [x.strip() for x in split(tl) + split(args_get(argv, "--maybe")) if x.strip().lower() not in known]
+        if unknown:
+            sys.stderr.write("Readback: not on the map, ignored: " + ", ".join(unknown) + ". Use tile ids from the map.\n")
         prev = load_run(root)
         run = record_plan(root, m, "", src, split(tl), split(args_get(argv, "--maybe"))) if tl is not None else prev
         if tl is not None:
@@ -1313,9 +1331,9 @@ def map_request(m, source="plan"):
             "(features and parts; only what the user asked for).")
     return ("Readback: " + what + " Put tiles you are sure of in --tiles and "
             "tiles you are only partly sure of in --maybe:\n" + tile_list(m) +
-            "\nThen run: python \"" + os.path.abspath(__file__) + "\" plan --tiles id1,id2 --maybe id3" +
+            "\nThen run: \"" + sys.executable.replace(os.sep, "/") + "\" \"" + os.path.abspath(__file__) + "\" plan --tiles id1,id2 --maybe id3" +
             (" --source intent" if source == "intent" else "") + "  "
-            "and show the user the PLAN board it prints, unchanged (every line), in a code block. If it has maybe tiles or a "
+            "and show the user the 'About to change' board it prints, unchanged (every line), in a code block. If it has maybe tiles or a "
             "'usually changes with' question, ask the user once which to include, then run plan --tiles again "
             "with the final list (no --maybe" + (", same --source" if source == "intent" else "") + ") before editing. Otherwise carry on.")
 

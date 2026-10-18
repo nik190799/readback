@@ -1,0 +1,12 @@
+#!/bin/sh
+# Readback launcher: runs rb.py with the first Python 3.8+ it finds. macOS and most Linux have only
+# python3, Windows often has only python or py, and the Windows Store stub fails the check and is skipped.
+here=${0%/*}
+[ "$here" = "$0" ] && here=.
+for p in python3 python py; do
+  if "$p" -c 'import sys; sys.exit(sys.version_info < (3, 8))' >/dev/null 2>&1; then
+    exec "$p" "$here/rb.py" "$@"
+  fi
+done
+echo "Readback needs Python 3.8+ on PATH (python3, python or py)." >&2
+exit 0

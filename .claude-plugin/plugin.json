@@ -1,6 +1,6 @@
 {
   "name": "readback",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Shows a code change as a product picture: which features and parts changed, what was planned, and who needs to act.",
   "author": { "name": "Nikhil Kadalge" },
   "keywords": ["review", "visualization", "pull-request", "product"],
