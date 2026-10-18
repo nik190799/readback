@@ -1,0 +1,17 @@
+{
+  "name": "readback",
+  "owner": {
+    "name": "Nikhil Kadalge"
+  },
+  "metadata": {
+    "description": "Readback: see a code change as a product picture."
+  },
+  "plugins": [
+    {
+      "name": "readback",
+      "source": "./",
+      "description": "Shows a code change as a product picture: features and parts touched, plan vs done, who must act.",
+      "version": "0.2.0"
+    }
+  ]
+}

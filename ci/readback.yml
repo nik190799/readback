@@ -1,0 +1,50 @@
+# Copy to .github/workflows/readback.yml in a repo that has .readback/map.json.
+# Posts (and keeps updating) one Readback comment per PR; optionally pings Slack
+# only for people who must act (finance, owners, PM).
+name: Readback
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, edited]
+permissions:
+  contents: read
+  pull-requests: write
+jobs:
+  board:
+    runs-on: ubuntu-latest
+    env:
+      SLACK_WEBHOOK: ${{ secrets.READBACK_SLACK_WEBHOOK }}
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.11" }
+      - name: Fetch Readback
+        run: curl -fsSL https://raw.githubusercontent.com/OWNER/readback/v0.2.0/bin/rb.py -o /tmp/rb.py
+      - name: Draw board
+        env:
+          PLAN: ${{ github.event.pull_request.body }}
+          RANGE: ${{ github.event.pull_request.base.sha }}..${{ github.event.pull_request.head.sha }}
+        run: |
+          printf '%s' "$PLAN" | python /tmp/rb.py show "$RANGE" --plan - --format md > board.md
+          printf '%s' "$PLAN" | python /tmp/rb.py show "$RANGE" --plan - --format slack --link "${{ github.event.pull_request.html_url }}" > slack.json
+          echo "<!-- readback -->" >> board.md
+      - name: Post or update the PR comment
+        env: { GH_TOKEN: "${{ github.token }}" }
+        run: |
+          id=$(gh api repos/${{ github.repository }}/issues/${{ github.event.number }}/comments \
+                --jq '.[] | select(.body | contains("<!-- readback -->")) | .id' | head -1)
+          if [ -n "$id" ]; then
+            gh api -X PATCH repos/${{ github.repository }}/issues/comments/$id -F body=@board.md
+          else
+            gh pr comment ${{ github.event.number }} --body-file board.md
+          fi
+      - name: Ping Slack for people who act
+        if: ${{ env.SLACK_WEBHOOK != '' }}
+        run: |
+          python - <<'EOF'
+          import json, os, urllib.request
+          msg = json.load(open("slack.json"))
+          if msg["notify"]:   # silent unless someone must act
+              req = urllib.request.Request(os.environ["SLACK_WEBHOOK"], json.dumps({"blocks": msg["blocks"]}).encode(), {"Content-Type": "application/json"})
+              urllib.request.urlopen(req)
+          EOF

@@ -1,0 +1,6 @@
+# Trial tooling, judge data and results (local only)
+trial/
+.readback/
+__pycache__/
+*.pyc
+.DS_Store
