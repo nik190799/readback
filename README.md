@@ -45,7 +45,7 @@ Needs Python 3.8+ and git. No other dependencies.
 /readback HEAD~3..HEAD --as finance
 /readback --format md             paste into a PR description
 /readback --format html           shareable page in .readback/board.html
-/readback check                   coverage, then asks who owns the largest shared files
+/readback check                   coverage, then asks who owns shared files and widgets
 /readback plan                    map the current plan to tiles and draw the PLAN board
 /readback stats                   how plans held up: your answers to the plan questions, plan vs done
 ```
@@ -58,7 +58,8 @@ confirm it, and it never raises a flag) · ① ② ③ = cited in the sentence �
 in the plan · "not touched" = planned but not done (both only against a real plan: plan mode or a
 PR body with a `Readback-Plan:` line) · "code only, no product change" = a refactor, revert, CI, docs
 or tooling change (from commit messages and the file mix), shown without money or plan flags ·
-"brushed" = a tiny incidental touch. The headline ranks customer-facing tiles first; mark internal
+"brushed" = a tiny incidental touch · "via shared file" = a planned feature changed only
+through a file it shares with others (an app bar on every screen). The headline ranks customer-facing tiles first; mark internal
 tiles with `"audience": "internal"` in the map.
 
 ## How well the plan held up
@@ -80,4 +81,9 @@ board shows what changed and no flags. It keeps one comment updated per PR, and 
 
 `init` drafts tiles from your folder structure. Rename them to words your PM would use, merge
 small ones, and add file globs for shared code that belongs to a feature. The most specific glob wins.
+A file several features draw (an app bar, a shared card) can be marked shared instead of owned:
+`rb.py own lib/widgets/app_bar.dart shared --by closet,outfit-ideas` writes
+`"shared_by": {"lib/widgets/app_bar.dart": ["closet", "outfit-ideas"]}` (`--by all` = every
+feature). When it changes, planned features on that list count as changed, "via shared file";
+it never makes a feature unplanned. `check` suggests these from the imports.
 Flags: `"risk": "high"`, `"money": true`, `"owner": "@handle"`.

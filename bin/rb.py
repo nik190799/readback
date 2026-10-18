@@ -12,7 +12,7 @@ One model, many surfaces. Every command reads the repo's map
   rb.py plan --show [--format ...]  the stored PLAN board again
   rb.py stats [--format json]       how plans held up: answers to the plan questions, plan vs done
   rb.py check                       validate the map; list the largest shared files to assign
-  rb.py own PATH FEATURE|shared     record who owns a shared file
+  rb.py own PATH FEATURE|shared [--by a,b|all]   record who owns a shared file (and who uses it)
   rb.py hook-plan | hook-prompt | hook-edit | hook-done   (called by plugin hooks; JSON on stdin)
 
 No dependencies beyond Python 3.8 and git.
@@ -256,27 +256,62 @@ def match(path, g):
     return fnmatch.fnmatch(path, g)
 
 
-def owner_of(path, tiles):
+def spec(g):
+    return glob_spec(g) + (1000 if "*" not in g else 0)
+
+
+def owner_score(path, tiles):
     best, bs = None, -1
     for t in tiles:
         for g in t["owns"]:
             if match(path, g):
-                s = glob_spec(g) + (1000 if "*" not in g else 0)
+                s = spec(g)
                 if s > bs:
                     best, bs = t, s
-    return best
+    return best, bs
+
+
+def owner_of(path, tiles):
+    return owner_score(path, tiles)[0]
+
+
+def shared_rule(m, path):
+    """The most specific shared entry for a path: (glob, user ids). "shared" lists paths the
+    owner marked shared (no users); "shared_by" maps a path or glob to the features that use it
+    (["*"] = every feature), e.g. the app bar every screen draws."""
+    best, bs = None, -1
+    for g in m.get("shared", []):
+        if match(path, g) and spec(g) > bs:
+            best, bs = (g, []), spec(g)
+    for g, users in (m.get("shared_by") or {}).items():
+        if match(path, g) and spec(g) >= bs:
+            best, bs = (g, users), spec(g)
+    return best, bs
+
+
+def shared_users(m, path):
+    rule = shared_rule(m, path)[0]
+    if not rule:
+        return []
+    ids = [t["id"] for t in m["levels"]["features"]["tiles"]]
+    return ids if "*" in rule[1] else [i for i in rule[1] if i in ids]
 
 
 def tile_of(m, level, path):
-    """owner_of, plus two feature-level rules: docs are never product unless the map's
-    product_docs globs say so (a plugin's skills), and app-wide stylesheets and theme files
-    stay shared unless the map names the exact path."""
+    """owner_of, plus three feature-level rules: docs are never product unless the map's
+    product_docs globs say so (a plugin's skills), app-wide stylesheets and theme files
+    stay shared unless the map names the exact path, and a file the map marks shared
+    belongs to no single feature unless a tile owns it more specifically."""
     tiles = m["levels"][level]["tiles"]
     if level == "features":
         if re.search(DOCS_RE, path) and not any(match(path, g) for g in m.get("product_docs", [])):
             return None
         if re.search(SHARED_STYLE_RE, path) and not any(path in t["owns"] for t in tiles):
             return None
+        if m.get("shared") or m.get("shared_by"):
+            best, bs = owner_score(path, tiles)
+            rule, rs = shared_rule(m, path)
+            return None if rule and rs >= bs else best
     return owner_of(path, tiles)
 
 
@@ -458,6 +493,14 @@ def resolve(m, files, level="features", lens="change", expected=None, phase="DON
     expected = set(expected or []) if not quiet else set()
     # Tiles Claude was less sure of: a dotted ring, never an "unplanned" or "untouched" flag
     maybe = set(maybe or []) - expected if not quiet else set()
+    # A shared file (the app bar on every screen) changes each feature that uses it. That
+    # confirms a planned or maybe feature; it never makes an unplanned one.
+    via = {}
+    if level == "features" and phase != "PLAN" and (m.get("shared") or m.get("shared_by")):
+        for p in unmapped:
+            for tid in shared_users(m, p):
+                if tid in expected | maybe:
+                    via.setdefault(tid, []).append(p)
     # Flags need a confidence bar: a tile whose files the plan names was planned, and a
     # planned tile is not called untouched once any file the plan names has changed
     named = {tid: any(named_in(plan_text, p) for p in e["paths"]) for tid, e in touched.items()}
@@ -488,7 +531,7 @@ def resolve(m, files, level="features", lens="change", expected=None, phase="DON
     for t in tiles:
         tid = t["id"]
         info = touched.get(tid)
-        board.append({
+        board.append(dict({
             "id": tid, "name": t["name"], "sub": t.get("sub", ""),
             "touched": bool(info), "sweep": bool(info and info["sweep"]),
             "brushed": bool(info and info["brushed"]), "quiet": bool(info) and quiet and level == "features",
@@ -498,9 +541,9 @@ def resolve(m, files, level="features", lens="change", expected=None, phase="DON
             "disc": discs.get(tid),
             "risk_lines": (info or {}).get("risk_lines", 0),
             "unplanned": bool(info) and not info["brushed"] and bool(expected) and tid not in expected | maybe and not named.get(tid) and phase != "PLAN",
-            "missed": tid in expected and not (info and not info["brushed"]) and not plan_files_changed and phase != "PLAN",
+            "missed": tid in expected and not (info and not info["brushed"]) and not plan_files_changed and tid not in via and phase != "PLAN",
             "risk": t.get("risk"), "money": t.get("money"), "owner": t.get("owner", ""),
-            "audience": t.get("audience", "customer")})
+            "audience": t.get("audience", "customer")}, **({"via_shared": via[tid][:8]} if tid in via else {})))
     return {"product": m.get("product", ""), "level": level, "lens": lens, "phase": phase,
             "kind": kind["kind"], "tiles": board, "unmapped": unmapped, "files": len(files),
             "sentence": sentence(board, lens, phase, kind), "acts": acts(m, board, lens, kind, phase)}
@@ -520,7 +563,12 @@ def sentence(board, lens, phase, kind=None):
     by = {b["disc"]: b for b in board if b["disc"]}
     mb = [b["name"] for b in board if b.get("maybe")]
     ask = (" Maybe: " + ", ".join(mb[:4]) + " (confirm before coding).") if mb and phase == "PLAN" else ""
+    vs = [b for b in board if b.get("via_shared") and not (b["touched"] and not b["brushed"])]
+    via = (" Changed through a shared file: " + ", ".join(b["name"] for b in vs[:3]) + " (" +
+           ", ".join(sorted({os.path.basename(p) for b in vs for p in b["via_shared"]})[:2]) + ").") if vs else ""
     if not by:
+        if via:
+            return via.strip()
         if any(b["touched"] for b in board):
             return "Only sweeps here (many tiny edits); nothing stands out for this lens."
         return "Nothing at this level changed." if phase != "PLAN" else ("Nothing certain yet." + ask if mb else "No tiles predicted yet.")
@@ -542,7 +590,7 @@ def sentence(board, lens, phase, kind=None):
     bt = [b["name"] for b in board if b["missed"] and b.get("brushed")]
     if bt:
         s += " Planned but barely touched: " + ", ".join(bt[:3]) + "."
-    return s
+    return s + via
 
 
 def acts(m, board, lens, kind=None, phase="DONE"):
@@ -612,6 +660,9 @@ def render_term(b, width=80):
         disc = DISC[t["disc"] - 1] if t["disc"] else " "
         tag = "sweep" if t["sweep"] else ("unplanned" if t["unplanned"] else (("barely touched" if t.get("brushed") else "not touched") if t["missed"] else ("maybe" if t.get("maybe") and b["phase"] == "PLAN" else "")))
         meta = (plural(t["files"], "file") + ", " + plural(t["lines"], "line")) if t["touched"] and b["phase"] != "PLAN" else ""
+        if t.get("via_shared") and not (t["touched"] and not t["brushed"]):
+            vp = t["via_shared"]
+            meta = "via " + os.path.basename(vp[0]) + (" +%d" % (len(vp) - 1) if len(vp) > 1 else "")
         L.append((" " + disc + " " + mark + " " + bar(t["fill"]) + " " + t["name"].ljust(22)[:22] + " " + meta.ljust(22) + " " + tag)[:width].rstrip())
     quiet = [t["name"] for t in b["tiles"] if t.get("quiet")]
     if quiet:
@@ -645,7 +696,7 @@ def render_term(b, width=80):
 def shown_tile(t, phase="DONE"):
     """Tiles drawn as touched: real work, not code-only (no product change) or a one-line brush,
     plus planned tiles; a 'maybe' that never happened is just untouched once the work is done."""
-    return (t["touched"] and not t.get("quiet") and not t.get("brushed")) or (t["ring"] and (phase == "PLAN" or not t.get("maybe")))
+    return (t["touched"] and not t.get("quiet") and not t.get("brushed")) or (t["ring"] and (phase == "PLAN" or not t.get("maybe") or bool(t.get("via_shared"))))
 
 
 def render_line(b):
@@ -684,6 +735,8 @@ def render_md(boards, atl=None):
             f = {"strong": "🟪", "light": "🟣", "none": "⬜"}[t["fill"]] if not t["sweep"] else "▫️"
             d = DISC[t["disc"] - 1] if t["disc"] else ""
             extra = " *(unplanned)*" if t["unplanned"] else ((" *(planned, barely touched)*" if t.get("brushed") else " *(planned, untouched)*") if t["missed"] else "")
+            if t.get("via_shared") and not (t["touched"] and not t["brushed"]):
+                extra = " *(via shared " + ", ".join("`" + os.path.basename(p) + "`" for p in t["via_shared"][:2]) + ")*"
             cells.append(f + " " + d + " " + t["name"] + extra)
         L.append(" · ".join(cells) or "_nothing at this level_")
         quiet = [t["name"] for t in bb["tiles"] if t.get("quiet")]
@@ -728,12 +781,14 @@ def svg_board(b):
     for i, t in enumerate(tiles):
         x, y = G + (i % cols) * (W + G), G + (i // cols) * (H + G)
         cls = "t " + ("touched " if t["touched"] else "un ") + ("sweep " if t["sweep"] else "") + "f-" + t["fill"]
-        if t["ring"] and (b["phase"] == "PLAN" or t["touched"] or not t.get("maybe")):
+        if t["ring"] and (b["phase"] == "PLAN" or t["touched"] or not t.get("maybe") or t.get("via_shared")):
             out.append('<rect class="ring%s" x="%d" y="%d" width="%d" height="%d" rx="12"/>' % (" maybe" if t.get("maybe") else "", x - 5, y - 5, W + 10, H + 10))
         out.append('<g class="%s"><rect x="%d" y="%d" width="%d" height="%d" rx="9"/>' % (cls, x, y, W, H))
         out.append('<text class="nm" x="%d" y="%d">%s</text>' % (x + 12, y + 28, html.escape(t["name"][:20])))
         sub = "sweep" if t["sweep"] else ("code only" if t.get("quiet") else ("brushed" if t.get("brushed") else None))
         sub = sub or ("unplanned" if t["unplanned"] else ("planned, untouched" if t["missed"] else (str(t["files"]) + " files" if t["touched"] and b["phase"] != "PLAN" else "")))
+        if t.get("via_shared") and not (t["touched"] and not t["brushed"]) and b["phase"] != "PLAN":
+            sub = "via shared file"
         if b["phase"] == "PLAN":
             sub = "maybe, confirm" if t.get("maybe") else ("will change" if t["ring"] else "")
         out.append('<text class="sb" x="%d" y="%d">%s</text></g>' % (x + 12, y + 50, html.escape(sub)))
@@ -903,7 +958,7 @@ def note_done(root, run, b):
     """The latest DONE board for the current plan; stats keeps the last one per plan."""
     if not run.get("plan_id") or not plan_expected(run):
         return
-    touched = [t["id"] for t in b["tiles"] if t["touched"] and not t["sweep"] and not t.get("brushed") and not t.get("quiet")]
+    touched = [t["id"] for t in b["tiles"] if (t["touched"] and not t["sweep"] and not t.get("brushed") and not t.get("quiet")) or t.get("via_shared")]
     log_event(root, {"ev": "done", "plan": run["plan_id"], "kind": b["kind"], "planned": plan_expected(run).get("features", []),
                      "maybe": plan_maybe(run).get("features", []), "touched": touched})
 
@@ -1071,6 +1126,47 @@ def shared_files(root, m, files, n=10):
     return sorted(out, reverse=True)[:n]
 
 
+UI_RE = (r"(?i)(^|/)(widgets?|components?|ui|views?|layouts?|partials?|shell)/"
+         r"|(^|[/_-])(app_?bar|header|footer|nav|navbar|sidebar|drawer|layout|scaffold|toolbar|tab_?bar|menu)[^/]*\.[a-z]+$")
+IMPORT_RE = r"(?m)^\s*(import|export|from|require|use|#include|part)\b.*$|\brequire\(.*\)|\bimport\(.*\)"
+
+
+def widely_used(root, m, files, n=8, min_users=2):
+    """UI files one feature owns through a glob that code in 2+ other features imports: an app
+    bar every screen draws, a shared card. Read from import lines that name the file's stem."""
+    feats = m["levels"]["features"]["tiles"]
+    stems = {}
+    for p in files:
+        stems.setdefault(os.path.splitext(os.path.basename(p))[0].lower(), []).append(p)
+    who = {}
+    for p in files:
+        t = tile_of(m, "features", p)
+        if not t or not re.search(CODE_RE, p) or re.search(TOOLING_RE, p):
+            continue
+        try:
+            with open(os.path.join(root, p), encoding="utf-8", errors="replace") as f:
+                src = f.read(400000)
+        except OSError:
+            continue
+        for mm in re.finditer(IMPORT_RE, src):
+            for tok in set(re.findall(r"[A-Za-z0-9_\-]+", mm.group(0).lower())):
+                who.setdefault(tok, set()).add(t["id"])
+    out = []
+    for stem, ps in stems.items():
+        if len(ps) != 1 or len(stem) < 5:
+            continue
+        p = ps[0]
+        if not re.search(CODE_RE, p) or not re.search(UI_RE, p) or re.search(TOOLING_RE, p) or shared_rule(m, p)[0]:
+            continue
+        t = tile_of(m, "features", p)
+        if not t or p in t["owns"]:
+            continue  # unowned files are listed above; an exact path is an owner's answer
+        users = who.get(stem, set()) - {t["id"]}
+        if len(users) >= min_users:
+            out.append((len(users), p, t, [f for f in feats if f["id"] in users]))
+    return sorted(out, key=lambda x: (-x[0], x[1]))[:n]
+
+
 def cmd_check(argv, quiet=False):
     root = repo_root()
     m = load_map(root)
@@ -1092,6 +1188,14 @@ def cmd_check(argv, quiet=False):
             msg.append("  %6d  %s" % (n, p))
         msg.append("Features: " + ", ".join(t["id"] for t in m["levels"]["features"]["tiles"]))
         msg.append("Answer with: rb.py own <path> <feature-id|shared>")
+    wide = widely_used(root, m, files)
+    if wide:
+        msg.append("")
+        msg.append("Owned by one feature, drawn by others (a shared widget?). Keep the owner, or mark it shared?")
+        for _, p, t, users in wide:
+            msg.append("  %s  owner %s; used by %s" % (p, t["id"], ", ".join(u["id"] for u in users)))
+            msg.append("    shared: rb.py own %s shared --by %s" % (p, ",".join([t["id"]] + [u["id"] for u in users])))
+        msg.append("Shared means a planned feature on the --by list counts as changed when the file changes (--by all = every feature).")
     out = "\n".join(msg)
     if not quiet:
         print(out)
@@ -1103,20 +1207,40 @@ def cmd_own(argv):
     root = repo_root()
     m = load_map(root)
     if not m or len(argv) < 2:
-        print("usage: rb.py own <path> <feature-id|shared>")
+        print("usage: rb.py own <path> <feature-id|shared> [--by feature-id,...|all]")
         return
     path, tid = argv[0].replace("\\", "/"), argv[1]
+    feats = m["levels"]["features"]["tiles"]
+    find = lambda x: next((t for t in feats if t["id"] == x or t["name"].lower() == x.lower()), None)
     if tid == "shared":
-        m.setdefault("shared", [])
-        if path not in m["shared"]:
-            m["shared"].append(path)
+        by = args_get(argv, "--by")
+        if by is not None:
+            users = ["*"] if by.strip().lower() in ("all", "*") else [find(x.strip()) for x in by.split(",") if x.strip()]
+            if None in users:
+                print("No feature in '%s'. Features: %s" % (by, ", ".join(x["id"] for x in feats)))
+                return
+            m.setdefault("shared_by", {})[path] = users if users == ["*"] else [u["id"] for u in users]
+            if path in m.get("shared", []):
+                m["shared"].remove(path)
+        else:
+            m.setdefault("shared", [])
+            if path not in m["shared"]:
+                m["shared"].append(path)
+        for t in feats:  # a shared file is no single feature's
+            if path in t["owns"]:
+                t["owns"].remove(path)
     else:
-        t = next((t for t in m["levels"]["features"]["tiles"] if t["id"] == tid or t["name"].lower() == tid.lower()), None)
+        t = find(tid)
         if not t:
-            print("No feature '%s'. Features: %s" % (tid, ", ".join(x["id"] for x in m["levels"]["features"]["tiles"])))
+            print("No feature '%s'. Features: %s" % (tid, ", ".join(x["id"] for x in feats)))
             return
         if path not in t["owns"]:
             t["owns"].append(path)
+        if path in m.get("shared", []):
+            m["shared"].remove(path)
+        (m.get("shared_by") or {}).pop(path, None)
+        if m.get("shared_by") == {}:
+            del m["shared_by"]
     with open(map_path(root), "w", encoding="utf-8") as f:
         json.dump(m, f, indent=1)
     print("%s -> %s" % (path, tid))
