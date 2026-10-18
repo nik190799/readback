@@ -30,6 +30,10 @@ CHORE_RE = r"(?i)^(refactor|ci|chore|docs?|tests?|style|build|perf)(\([^)]*\))?!
 NOCHANGE_RE = r"(?i)(no|zero) (functional|behaviou?r(al)?|product|user[- ]facing) changes?|behaviou?r[- ]preserving|pure refactor"
 TOOLING_RE = r"(?i)((^|/)(tests?|spec|docs?|scripts?|tools?|\.github|\.claude|\.cadence|eval|ci)/|\.md$|\.lock$|_test\.|\.test\.|\.spec\.|(^|/)\.[^/]+$)"
 INTERNAL_WORDS = r"(?i)\b(admin|eval|setup|internal|tooling|dev|ops|scripts?)\b"
+DOCS_RE = r"(?i)\.(md|mdx|markdown|rst)$"
+SHARED_STYLE_RE = r"(?i)(^|/)(styles?|themes?|tokens|globals?|variables|base|main|app|index)\.(css|scss|sass|less)$|(^|/)(theme|tokens)\.(dart|ts|tsx|js|jsx)$"
+RISK_SKIP_RE = (r"(?i)((^|/)(tests?|spec|__tests__|integration_test)/|_test\.|\.test\.|\.spec\.|(^|/)test_[^/]+$|\.(md|mdx|markdown|rst)$|\.lock$"
+                r"|(^|/)(package-lock\.json|npm-shrinkwrap\.json|pnpm-lock\.yaml|yarn\.lock|go\.sum)$)")
 RISK_WORDS = r"(auth|login|signin|session|security|secret|rules|permission|payment|billing|razorpay|stripe|subscription|purchase|iap|migration|schema|deploy|release|workflow|\.github|infra|firebase\.json|codemagic|fastlane|pubspec\.lock|package-lock|server|relay)"
 MONEY_WORDS = r"(payment|billing|price|pricing|promo|discount|coupon|offer|credit|wallet|subscription|razorpay|stripe|checkout|cart|bag|order|invoice|iap|purchase|plan)"
 SKIP_DIRS = {".git", "node_modules", "build", "dist", ".dart_tool", ".idea", ".vscode", "Pods", ".gradle", "__pycache__", ".next", "coverage", ".readback", ".claude"}
@@ -206,7 +210,9 @@ def draft_map(root):
     parts[-1]["risk"] = "high"
     parts = [t for t in parts if any(match(p, g) for p in files for g in t["owns"])]
     name = title(os.path.basename(root))
-    return {"version": 1, "product": name,
+    # In a plugin, skill and command markdown is the product, not docs
+    pdocs = [d + "/**" for d in ("skills", "commands", "agents") if d in dirs]
+    return {"version": 1, "product": name, "product_docs": pdocs,
             "levels": {"features": {"tiles": feats}, "parts": {"tiles": parts}},
             "roles": {
                 "engineer": {"home": ["parts", "change"], "acts_on": ["risk"]},
@@ -242,6 +248,28 @@ def owner_of(path, tiles):
                 if s > bs:
                     best, bs = t, s
     return best
+
+
+def tile_of(m, level, path):
+    """owner_of, plus two feature-level rules: docs are never product unless the map's
+    product_docs globs say so (a plugin's skills), and app-wide stylesheets and theme files
+    stay shared unless the map names the exact path."""
+    tiles = m["levels"][level]["tiles"]
+    if level == "features":
+        if re.search(DOCS_RE, path) and not any(match(path, g) for g in m.get("product_docs", [])):
+            return None
+        if re.search(SHARED_STYLE_RE, path) and not any(path in t["owns"] for t in tiles):
+            return None
+    return owner_of(path, tiles)
+
+
+def named_in(text, path):
+    """The plan names a file: its path, its file name, or its stem in backticks."""
+    if not text:
+        return False
+    t, base = text.lower(), os.path.basename(path).lower()
+    stem = os.path.splitext(base)[0]
+    return path.lower() in t or re.search(r"(?<![\w.-])" + re.escape(base) + r"(?![\w-])", t) is not None or "`" + stem + "`" in t
 
 
 def expected_from_tiles(m, names):
@@ -329,9 +357,11 @@ def change_kind(commits, files, m=None):
             k = max((k for k in by if k != "product"), key=lambda k: by[k])
             return {"kind": k, "says": KIND_SAYS[k]}
     lines = sum(files.values()) or 1
-    feats = (m or {}).get("levels", {}).get("features", {}).get("tiles", [])
-    tool = sum(n for p, n in files.items() if re.search(TOOLING_RE, p) and not owner_of(p, feats))
-    if files and tool / lines >= 0.85:
+    owned = (lambda p: tile_of(m, "features", p)) if m else (lambda p: None)
+    tool = sum(n for p, n in files.items() if re.search(TOOLING_RE, p) and not owned(p))
+    # a fix that lands with a big test is still a fix: any non-test source file means product
+    src = any(re.search(CODE_RE, p) and not re.search(TOOLING_RE, p) for p in files)
+    if files and tool / lines >= 0.85 and not src:
         return {"kind": "tooling", "says": KIND_SAYS["tooling"]}
     return {"kind": "product", "says": ""}
 
@@ -343,7 +373,8 @@ def lens_score(t, info, lens, unplanned):
     if lens == "change":
         return lines
     if lens == "risk":
-        return lines * (3 if t.get("risk") == "high" else 0.4) + (lines if unplanned else 0)
+        rl = info.get("risk_lines", lines)  # tests, docs and lockfiles carry no risk of their own
+        return rl * (3 if t.get("risk") == "high" else 0.4) + (rl if unplanned else 0)
     if lens == "money":
         return lines if t.get("money") else 0
     if lens == "owner":
@@ -351,20 +382,21 @@ def lens_score(t, info, lens, unplanned):
     return lines
 
 
-def resolve(m, files, level="features", lens="change", expected=None, phase="DONE", kind=None):
+def resolve(m, files, level="features", lens="change", expected=None, phase="DONE", kind=None, plan_text=None):
     tiles = m["levels"][level]["tiles"]
     kind = kind or {"kind": "product", "says": ""}
     quiet = kind["kind"] != "product" and phase != "PLAN"
     touched, unmapped = {}, []
     for p, n in files.items():
-        t = owner_of(p, tiles)
+        t = tile_of(m, level, p)
         if not t:
             unmapped.append(p)
             continue
-        e = touched.setdefault(t["id"], {"lines": 0, "files": 0, "paths": []})
+        e = touched.setdefault(t["id"], {"lines": 0, "files": 0, "paths": [], "risk_lines": 0})
         e["lines"] += n
         e["files"] += 1
         e["paths"].append(p)
+        e["risk_lines"] += 0 if re.search(RISK_SKIP_RE, p) else n
     for e in touched.values():
         e["sweep"] = e["files"] >= 8 and e["lines"] / e["files"] <= 4
     # A one- or two-line brush next to real work is not a change to that feature
@@ -372,13 +404,17 @@ def resolve(m, files, level="features", lens="change", expected=None, phase="DON
     for e in touched.values():
         e["brushed"] = not e["sweep"] and len(touched) > 1 and e["lines"] <= max(3, 0.03 * top) and e["lines"] < top
     expected = set(expected or []) if not quiet else set()
+    # Flags need a confidence bar: a tile whose files the plan names was planned, and a
+    # planned tile is not called untouched once any file the plan names has changed
+    named = {tid: any(named_in(plan_text, p) for p in e["paths"]) for tid, e in touched.items()}
+    plan_files_changed = any(named_in(plan_text, p) for p in files)
     if phase == "PLAN":
         touched = {tid: {"lines": 1, "files": 0, "paths": [], "sweep": False, "brushed": False} for tid in expected}
     by_id = {t["id"]: t for t in tiles}
     scores = {}
     for t in tiles:
         if t["id"] in touched and not touched[t["id"]]["brushed"]:
-            unpl = bool(expected) and t["id"] not in expected
+            unpl = bool(expected) and t["id"] not in expected and not named.get(t["id"])
             scores[t["id"]] = lens_score(t, touched[t["id"]], lens, unpl)
     if quiet and level == "features":
         scores = {}  # no product change: nothing to headline at the feature level
@@ -406,8 +442,9 @@ def resolve(m, files, level="features", lens="change", expected=None, phase="DON
             "paths": (info or {}).get("paths", [])[:8],
             "fill": fill.get(tid, "none"), "ring": tid in expected,
             "disc": discs.get(tid),
-            "unplanned": bool(info) and not info["brushed"] and bool(expected) and tid not in expected and phase != "PLAN",
-            "missed": tid in expected and not (info and not info["brushed"]) and phase != "PLAN",
+            "risk_lines": (info or {}).get("risk_lines", 0),
+            "unplanned": bool(info) and not info["brushed"] and bool(expected) and tid not in expected and not named.get(tid) and phase != "PLAN",
+            "missed": tid in expected and not (info and not info["brushed"]) and not plan_files_changed and phase != "PLAN",
             "risk": t.get("risk"), "money": t.get("money"), "owner": t.get("owner", ""),
             "audience": t.get("audience", "customer")})
     return {"product": m.get("product", ""), "level": level, "lens": lens, "phase": phase,
@@ -455,7 +492,7 @@ def acts(m, board, lens, kind=None):
     for b in board:
         if not b["touched"] or b["sweep"] or b.get("brushed"):
             continue
-        if b["risk"] == "high" and b["lines"] >= 10:
+        if b["risk"] == "high" and b.get("risk_lines", b["lines"]) >= 10:
             out.append({"who": b["owner"] or "engineer", "do": "Review " + b["name"] + " before merge", "why": "risk", "tile": b["id"]})
         if not product:
             continue  # no product change: no money or plan questions to ask anyone
@@ -472,11 +509,11 @@ def acts(m, board, lens, kind=None):
     return uniq[:7]
 
 
-def atlas(m, files, expected_by_level, kind=None):
+def atlas(m, files, expected_by_level, kind=None, plan_text=None):
     cells = {}
     for lv in LEVELS:
         for ln in LENSES:
-            b = resolve(m, files, lv, ln, expected_by_level.get(lv), kind=kind)
+            b = resolve(m, files, lv, ln, expected_by_level.get(lv), kind=kind, plan_text=plan_text)
             mark = "○"
             if any(t["fill"] != "none" for t in b["tiles"]):
                 mark = "◐"
@@ -740,7 +777,7 @@ def plan_expected(run):
 
 
 def boards_for(m, files, run, level, lens, phase="DONE", kind=None):
-    return resolve(m, files, level, lens, plan_expected(run).get(level), phase, kind)
+    return resolve(m, files, level, lens, plan_expected(run).get(level), phase, kind, (run or {}).get("text"))
 
 
 def cmd_show(argv):
@@ -769,10 +806,10 @@ def cmd_show(argv):
     if plan:  # a PR body: flags only if Claude left a Readback-Plan line in it
         text = sys.stdin.read() if plan == "-" else plan
         tiles = plan_tiles_from_text(text)
-        run = {"source": "pr", "expected": expected_from_tiles(m, tiles) if tiles else {}}
+        run = {"source": "pr", "text": text, "expected": expected_from_tiles(m, tiles) if tiles else {}}
     exp_arg = args_get(argv, "--expected")
     if exp_arg:
-        run = {"source": "plan", "expected": expected_from_tiles(m, exp_arg.split(","))}
+        run = {"source": "plan", "text": (run or {}).get("text"), "expected": expected_from_tiles(m, exp_arg.split(","))}
     files = diff_files(rng)
     kind = change_kind(commit_log(rng), files, m)
     b = boards_for(m, files, run, level, lens, kind=kind)
@@ -784,8 +821,8 @@ def cmd_show(argv):
         print(render_trailer(b))
     elif fmt in ("md", "html"):
         exp = plan_expected(run)
-        boards = [b] + [resolve(m, files, lv, ln, exp.get(lv), kind=kind) for lv, ln in (("parts", "risk"), ("features", "money")) if (lv, ln) != (level, lens)]
-        atl = atlas(m, files, exp, kind)
+        boards = [b] + [resolve(m, files, lv, ln, exp.get(lv), kind=kind, plan_text=run.get("text")) for lv, ln in (("parts", "risk"), ("features", "money")) if (lv, ln) != (level, lens)]
+        atl = atlas(m, files, exp, kind, run.get("text"))
         out = render_md(boards, atl) if fmt == "md" else render_html(boards, atl)
         dest = args_get(argv, "--out")
         if dest:
@@ -822,11 +859,10 @@ CODE_RE = r"\.(dart|js|mjs|cjs|ts|tsx|jsx|py|go|rb|kt|swift|java|vue|svelte|html
 
 def shared_files(root, m, files, n=10):
     """Largest product-code files no feature owns (not tooling, not already marked shared)."""
-    tiles = m["levels"]["features"]["tiles"]
     known = set(m.get("shared", []))
     out = []
     for p in files:
-        if p in known or owner_of(p, tiles) or re.search(TOOLING_RE, p) or not re.search(CODE_RE, p):
+        if p in known or tile_of(m, "features", p) or re.search(TOOLING_RE, p) or not re.search(CODE_RE, p):
             continue
         try:
             with open(os.path.join(root, p), "rb") as f:
@@ -845,7 +881,7 @@ def cmd_check(argv, quiet=False):
     msg = []
     for lv in LEVELS:
         tiles = m["levels"][lv]["tiles"]
-        un = [p for p in files if not owner_of(p, tiles)]
+        un = [p for p in files if not tile_of(m, lv, p)]
         empty = [t["name"] for t in tiles if not any(match(p, g) for p in files for g in t["owns"])]
         msg.append("%s: %d tiles, %d of %d files unmapped (%.0f%%)%s" % (lv, len(tiles), len(un), len(files), 100.0 * len(un) / max(1, len(files)),
                    ("; empty tiles: " + ", ".join(empty)) if empty else ""))
