@@ -130,3 +130,22 @@ Page: https://claude.ai/artifact/5ACjPbKQMi33e92g6syFUJ (private). We found 58 b
 **Surfaces and checks**
 - The PR comment, Slack card, 80-column terminal view and 72-column commit trailer are all generated from the same data.
 - 17 build checks, all passing.
+
+---
+
+## Plan board with confidence (2026-10-18)
+
+The trial predicted tiles from intent alone, with no diff, on 40 boards (`trial/results/intent-prediction.md`, not committed). Opus working from a written plan reached 91.7% precision and 85% exact boards. Diff labels reach 95.7% and 90%. Picks Claude marked high-confidence were 98–100% exact; medium and low ones were often wrong. The most common miss was a second tile that changes along with the main one.
+
+What we built from that:
+- `rb.py plan --tiles a,b --maybe c` takes the tiles Claude is sure of and the ones it is not.
+- Sure tiles get a solid ring and maybe tiles a dotted ring.
+- Maybe tiles never raise an "unplanned" or "not touched" flag. Once the work is done, a maybe tile nobody touched just counts as untouched.
+- "Usually changes with" questions come from recent git history: a tile that changed in the same commit as a sure tile at least 3 times, and in 30% or more of that tile's commits. Commits touching 5+ features are left out. The map can also list `"couples": [ids]` per feature.
+- `--format html --out FILE` draws the PLAN picture as a page with a "Confirm before coding" card. `plan --show` redraws the stored plan.
+- After plan mode, Claude shows the PLAN board and asks the user once about any maybes or couples. It then records the final list before editing.
+- Money and risk notes on the PLAN board are heads-ups ("touches money, expect a check", "plan a review"), since nothing is built yet.
+- Every mapped plan, the user's answers and the latest DONE board go to `.readback/log.jsonl` (local, gitignored, tile ids only). `rb.py stats` turns them into the two gates: plans the user corrected (target under 20%, our stand-in for the Wrong? rate) and planned tiles that changed (target 90%+).
+- A headless `claude -p` run has no ExitPlanMode, so the plan-mode hook never fires there; many interactive users skip plan mode too. A PreToolUse hook now holds Claude's first repo edit in a session with no mapped plan and asks it to name the tiles it is about to touch (`--source intent`). It shows the same PLAN board and question, once per session. An intent mapping lasts for that session only; plan-mode and PR plans last for the branch.
+- First live run (headless, The Atelier clone, a credits-badge change). The pre-edit hook fired, the PLAN board asked about 3 maybes, the user kept 2, and the DONE board and log matched. Fixes from the run: new untracked files now count their real lines (before, a 100-line new widget counted as 1 line and looked "brushed"). A planned tile with only a brush reads "barely touched" instead of "not touched". A tile the user just answered is not asked about again on the confirm board. Footer lines wrap instead of being cut at 80 columns. Still open: a shared widget (the app bar on every screen) is owned by one feature in the map, so "Outfit ideas" read as untouched.
+- Shared widgets. `check` now lists UI files one feature owns but 2+ other features import, and `own PATH shared --by a,b` records who uses them (new map field `shared_by`; the old `shared` list is honored too). A planned feature on the list counts as changed "via shared file" and is not flagged "not touched"; it never adds an unplanned flag. Boards for maps without these fields are byte-identical (160 of 160 trial outputs). On the live clone: planned tiles that changed went from 3 of 4 to 4 of 4.
