@@ -3,6 +3,8 @@
   "version": "0.4.0",
   "description": "Shows a code change as a product picture: which features and parts changed, what was planned, and who needs to act.",
   "author": { "name": "Nikhil Kadalge" },
+  "homepage": "https://github.com/nik190799/readback",
+  "repository": "https://github.com/nik190799/readback",
   "keywords": ["review", "visualization", "pull-request", "product"],
   "license": "MIT"
 }

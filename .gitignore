@@ -4,3 +4,6 @@ trial/
 __pycache__/
 *.pyc
 .DS_Store
+
+# Internal planning notes (local only)
+docs/roadmap.md

@@ -6,7 +6,7 @@ Readback reads your git diff and a small map of your product (`.readback/map.jso
 board: which **features** and **parts** changed, which of them were in the plan, and who has to act.
 
 ```
-Readback · Shringar · What changed · Features · Money
+Readback · Shopfront · What changed · Features · Money
 ──────────────────────────────────────────────
 Bag and offers ① touches money.
 

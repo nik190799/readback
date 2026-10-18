@@ -168,7 +168,7 @@ def draft_map(root):
             seen.add(leaf.lower())
             feats.append(tile(re.sub(r"\W+", "-", leaf.lower()), title(leaf), [k + "/**"]))
     # Features 2: flat modules - the same stem across layers is one feature
-    # (web/src/rooms.ts + server/backroom/rooms.py -> Rooms; src/page-home.js + index.html -> Home)
+    # (web/src/rooms.ts + server/app/rooms.py -> Rooms; src/page-home.js + index.html -> Home)
     if len(feats) < 4:
         stems = {}
         for p in files:
