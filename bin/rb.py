@@ -13,7 +13,7 @@ One model, many surfaces. Every command reads the repo's map
   rb.py stats [--format json]       how plans held up: answers to the plan questions, plan vs done
   rb.py check                       validate the map; list the largest shared files to assign
   rb.py own PATH FEATURE|shared     record who owns a shared file
-  rb.py hook-plan | hook-prompt | hook-done   (called by plugin hooks; JSON on stdin)
+  rb.py hook-plan | hook-prompt | hook-edit | hook-done   (called by plugin hooks; JSON on stdin)
 
 No dependencies beyond Python 3.8 and git.
 """
@@ -27,7 +27,11 @@ except Exception:
 LEVELS = ["features", "parts"]
 LENSES = ["change", "risk", "money", "owner"]
 DISC = "①②③④⑤"
-REAL_PLANS = {"plan", "pr"}  # ExitPlanMode or a PR body; an opening question is not a plan
+# A plan is Claude's own mapping: after ExitPlanMode, from a PR body, or of its intent right before
+# its first edit. The opening question is never a plan. Plan-mode and PR plans last for the branch;
+# an intent mapping belongs to the session that made it.
+REAL_PLANS = {"plan", "pr", "intent"}
+KEEP_PLANS = {"plan", "pr"}
 REVERT_RE = r"(?i)^(revert\b|revert:)"
 CHORE_RE = r"(?i)^(refactor|ci|chore|docs?|tests?|style|build|perf)(\([^)]*\))?!?:"
 NOCHANGE_RE = r"(?i)(no|zero) (functional|behaviou?r(al)?|product|user[- ]facing) changes?|behaviou?r[- ]preserving|pure refactor"
@@ -70,6 +74,16 @@ def base_ref():
     return "HEAD"
 
 
+def new_lines(p):
+    """Lines in a new, untracked file (binary or unreadable files count as 1)."""
+    try:
+        with open(p, "rb") as f:
+            data = f.read(2000000)
+    except OSError:
+        return 1
+    return 1 if b"\0" in data[:8000] else max(data.count(b"\n"), 1)
+
+
 def diff_files(rng=None):
     """Return {path: lines_changed}. rng None = branch work + uncommitted."""
     if rng:
@@ -80,7 +94,7 @@ def diff_files(rng=None):
         base = base_ref()
         out = git(["diff", "--numstat", "-M", base])
         for p in git(["ls-files", "--others", "--exclude-standard"]).splitlines():
-            out += "1\t0\t" + p + "\n"
+            out += "%d\t0\t%s\n" % (new_lines(p), p)
     files = {}
     for line in out.splitlines():
         parts = line.split("\t")
@@ -522,9 +536,12 @@ def sentence(board, lens, phase, kind=None):
     un = [b["name"] for b in board if b["unplanned"]]
     if un:
         s += " Not in the plan: " + ", ".join(un[:3]) + "."
-    mi = [b["name"] for b in board if b["missed"]]
+    mi = [b["name"] for b in board if b["missed"] and not b.get("brushed")]
     if mi:
         s += " Planned but untouched: " + ", ".join(mi[:3]) + "."
+    bt = [b["name"] for b in board if b["missed"] and b.get("brushed")]
+    if bt:
+        s += " Planned but barely touched: " + ", ".join(bt[:3]) + "."
     return s
 
 
@@ -593,17 +610,17 @@ def render_term(b, width=80):
     for t in shown:
         mark = "◌" if t.get("maybe") else ("◯" if t["ring"] else " ")
         disc = DISC[t["disc"] - 1] if t["disc"] else " "
-        tag = "sweep" if t["sweep"] else ("unplanned" if t["unplanned"] else ("not touched" if t["missed"] else ("maybe" if t.get("maybe") and b["phase"] == "PLAN" else "")))
+        tag = "sweep" if t["sweep"] else ("unplanned" if t["unplanned"] else (("barely touched" if t.get("brushed") else "not touched") if t["missed"] else ("maybe" if t.get("maybe") and b["phase"] == "PLAN" else "")))
         meta = (plural(t["files"], "file") + ", " + plural(t["lines"], "line")) if t["touched"] and b["phase"] != "PLAN" else ""
         L.append((" " + disc + " " + mark + " " + bar(t["fill"]) + " " + t["name"].ljust(22)[:22] + " " + meta.ljust(22) + " " + tag)[:width].rstrip())
     quiet = [t["name"] for t in b["tiles"] if t.get("quiet")]
     if quiet:
-        L.append(("   · code only, no product change: " + ", ".join(quiet))[:width])
+        note(L, "code only, no product change", quiet, width)
     brushed = [t["name"] + " (" + plural(t["lines"], "line") + ")" for t in b["tiles"] if t.get("brushed") and not t.get("quiet")]
     if brushed:
-        L.append(("   · brushed: " + ", ".join(brushed))[:width])
+        note(L, "brushed", brushed, width)
     if rest:
-        L.append(("   · " + ("not in the plan" if b["phase"] == "PLAN" else "untouched") + ": " + ", ".join(t["name"] for t in rest))[:width])
+        note(L, "not in the plan" if b["phase"] == "PLAN" else "untouched", [t["name"] for t in rest], width)
     if b.get("couples"):
         L.append("")
         for c in b["couples"]:
@@ -666,7 +683,7 @@ def render_md(boards, atl=None):
                 continue
             f = {"strong": "🟪", "light": "🟣", "none": "⬜"}[t["fill"]] if not t["sweep"] else "▫️"
             d = DISC[t["disc"] - 1] if t["disc"] else ""
-            extra = " *(unplanned)*" if t["unplanned"] else (" *(planned, untouched)*" if t["missed"] else "")
+            extra = " *(unplanned)*" if t["unplanned"] else ((" *(planned, barely touched)*" if t.get("brushed") else " *(planned, untouched)*") if t["missed"] else "")
             cells.append(f + " " + d + " " + t["name"] + extra)
         L.append(" · ".join(cells) or "_nothing at this level_")
         quiet = [t["name"] for t in bb["tiles"] if t.get("quiet")]
@@ -776,6 +793,12 @@ def plural(n, w):
     return str(n) + " " + w + ("" if n == 1 else "s")
 
 
+def note(L, label, names, width):
+    """A '· label: a, b, c' line under the board, wrapped rather than cut off."""
+    for i, line in enumerate(wrap(label + ": " + ", ".join(names), width - 5)):
+        L.append(("   · " if i == 0 else "     ") + line)
+
+
 def wrap(s, w):
     out, cur = [], ""
     for word in s.split():
@@ -816,8 +839,8 @@ def record_plan(root, m, text, source, tiles=None, maybe=None):
     tiles = Claude is confident they change; maybe = less sure, for the user to confirm."""
     run = load_run(root)
     if source == "prompt":
-        if run.get("source") in REAL_PLANS:
-            return run  # a real plan beats the opening prompt
+        if run.get("source") in KEEP_PLANS:
+            return run  # a plan-mode or PR plan beats the opening prompt
         run.update({"source": "prompt", "text": text[:4000], "expected": {}, "maybe": {}})
         run.pop("draft", None)
     else:
@@ -1112,7 +1135,8 @@ def plan_boards(m, run):
     """The PLAN picture: rings from the mapped plan, before any code exists."""
     exp, mb = run.get("expected", {}), run.get("maybe", {})
     boards = [resolve(m, {}, lv, "change", exp.get(lv), "PLAN", maybe=mb.get(lv)) for lv in LEVELS]
-    boards[0]["couples"] = couples(m, exp.get("features", []), mb.get("features", []))
+    boards[0]["couples"] = [c for c in couples(m, exp.get("features", []), mb.get("features", []))
+                            if c["tile"] not in run.get("answered", [])]
     return boards
 
 
@@ -1128,11 +1152,19 @@ def cmd_plan(argv):
         print("No map yet. Run /readback init first.")
         return
     src = args_get(argv, "--source", "plan")
+    if src not in REAL_PLANS:
+        src = "plan"
     tl = args_get(argv, "--tiles")
     if tl is not None or "--show" in argv:
         split = lambda s: [x for x in (s or "").split(",") if x.strip()]
         prev = load_run(root)
         run = record_plan(root, m, "", src, split(tl), split(args_get(argv, "--maybe"))) if tl is not None else prev
+        if tl is not None:
+            d = prev.get("draft")
+            if d and not run.get("maybe", {}).get("features"):
+                run["answered"] = sorted(set(d["maybe"]) | set(d["couples"]))  # the user's answer to the draft
+            else:
+                run.pop("answered", None)
         boards = plan_boards(m, run)
         if tl is not None:
             note_plan(root, prev, run, boards[0].get("couples", []))
@@ -1150,14 +1182,18 @@ def cmd_plan(argv):
     print(map_request(m))
 
 
-def map_request(m):
-    return ("Readback: map this plan to the product map before editing. Pick only the tiles the plan says it will change "
-            "(features and parts; leave out anything it does not ask for). Put tiles you are sure of in --tiles and "
+def map_request(m, source="plan"):
+    what = ("map this plan to the product map before editing. Pick only the tiles the plan says it will change "
+            "(features and parts; leave out anything it does not ask for)." if source == "plan" else
+            "before your first edit, say which tiles the change you are about to make will touch "
+            "(features and parts; only what the user asked for).")
+    return ("Readback: " + what + " Put tiles you are sure of in --tiles and "
             "tiles you are only partly sure of in --maybe:\n" + tile_list(m) +
-            "\nThen run: python \"" + os.path.abspath(__file__) + "\" plan --tiles id1,id2 --maybe id3  "
+            "\nThen run: python \"" + os.path.abspath(__file__) + "\" plan --tiles id1,id2 --maybe id3" +
+            (" --source intent" if source == "intent" else "") + "  "
             "and show the user the PLAN board it prints, in a code block. If it has maybe tiles or a "
             "'usually changes with' question, ask the user once which to include, then run plan --tiles again "
-            "with the final list (no --maybe) before editing. Otherwise carry on.")
+            "with the final list (no --maybe" + (", same --source" if source == "intent" else "") + ") before editing. Otherwise carry on.")
 
 
 def hook_input():
@@ -1195,6 +1231,32 @@ def hook_prompt():
     run = record_plan(root, m, data.get("prompt", ""), "prompt")
     run["session"] = data.get("session_id")
     save_run(root, run)
+
+
+def hook_edit():
+    """Before Claude's first edit in a session with no mapped plan (no plan mode, or a headless
+    run), stop that one edit and ask Claude to say which tiles it is about to touch. Once per session."""
+    data = hook_input()
+    root = repo_root()
+    m = load_map(root)
+    if not m:
+        return
+    path = (data.get("tool_input") or {}).get("file_path") or (data.get("tool_input") or {}).get("notebook_path") or ""
+    try:
+        rel = os.path.relpath(os.path.abspath(path), root).replace(os.sep, "/") if path else ""
+    except ValueError:
+        return  # another drive
+    if not rel or rel.startswith("../") or rel.startswith(".readback/") or os.path.isabs(rel):
+        return  # plan files, scratch files and Readback's own state are not product edits
+    run = load_run(root)
+    sid = data.get("session_id")
+    if (run.get("mapped") and run.get("source") in REAL_PLANS) or run.get("intent_asked") == sid:
+        return
+    run["intent_asked"] = sid
+    save_run(root, run)
+    print(json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny",
+                                             "permissionDecisionReason": map_request(m, "intent") +
+                                             " Then make this edit again."}}))
 
 
 def hook_done():
@@ -1241,6 +1303,8 @@ def main(argv):
         hook_plan()
     elif c == "hook-prompt":
         hook_prompt()
+    elif c == "hook-edit":
+        hook_edit()
     elif c == "hook-done":
         hook_done()
     else:

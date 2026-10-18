@@ -34,6 +34,7 @@ Needs Python 3.8+ and git. No other dependencies.
 |---|---|
 | You send the first message of a session | Keeps it as context only (an opening question is not a plan, so no flags) |
 | You approve a plan (plan mode) | Claude maps the plan to tiles (`rb.py plan --tiles sure --maybe unsure`) and shows the PLAN board before editing. If there are maybe tiles, or a tile that usually changes with a planned one, it asks you once and then records the final list |
+| Claude is about to make its first edit with no mapped plan (you skipped plan mode, or a headless `claude -p` run) | Holds that one edit and asks Claude which tiles the change will touch (`--source intent`), then shows the same PLAN board and question. Once per session |
 | Claude stops and the diff changed | Shows the board once (silent if nothing new changed) |
 
 ## On demand

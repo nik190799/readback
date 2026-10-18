@@ -11,7 +11,7 @@
       "name": "readback",
       "source": "./",
       "description": "Shows a code change as a product picture: features and parts touched, plan vs done, who must act.",
-      "version": "0.2.0"
+      "version": "0.3.0"
     }
   ]
 }

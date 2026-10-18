@@ -18,5 +18,5 @@ Run `python "${CLAUDE_PLUGIN_ROOT}/bin/rb.py" show [range] [level] [lens] [--as 
   for a shareable page use `--format html --out .readback/board.html`.
 - If there is no map, offer `/readback init`. If many files are unmapped, offer to add tiles for them.
 - When you write a PR description, end it with `Readback-Plan: Tile, Tile` (the tiles the PR sets out to change).
-- If a hook asks you to map a plan to tiles, run the `rb.py plan --tiles ... --maybe ...` command it gives before editing. Put tiles you are sure of in `--tiles` and partly-sure ones in `--maybe`. Show the PLAN board. If it has maybe tiles or a "usually changes with" question, ask the user once, then rerun with the final `--tiles`.
+- If a hook asks you to map a plan to tiles (after plan mode, or before your first edit), run the `rb.py plan --tiles ... --maybe ...` command it gives before editing. Put tiles you are sure of in `--tiles` and partly-sure ones in `--maybe`. Show the PLAN board. If it has maybe tiles or a "usually changes with" question, ask the user once, then rerun with the final `--tiles` (keep any `--source` the hook gave you).
 - Never invent tiles or numbers that the board did not print.
