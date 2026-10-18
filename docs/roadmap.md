@@ -130,3 +130,17 @@ Page: https://claude.ai/artifact/5ACjPbKQMi33e92g6syFUJ (private). We found 58 b
 **Surfaces and checks**
 - The PR comment, Slack card, 80-column terminal view and 72-column commit trailer are all generated from the same data.
 - 17 build checks, all passing.
+
+---
+
+## Plan board with confidence (2026-10-18)
+
+The trial predicted tiles from intent alone, with no diff, on 40 boards (`trial/results/intent-prediction.md`, not committed). Opus working from a written plan reached 91.7% precision and 85% exact boards. Diff labels reach 95.7% and 90%. Picks Claude marked high-confidence were 98–100% exact; medium and low ones were often wrong. The most common miss was a second tile that changes along with the main one.
+
+What we built from that:
+- `rb.py plan --tiles a,b --maybe c` takes the tiles Claude is sure of and the ones it is not.
+- Sure tiles get a solid ring and maybe tiles a dotted ring.
+- Maybe tiles never raise an "unplanned" or "not touched" flag. Once the work is done, a maybe tile nobody touched just counts as untouched.
+- "Usually changes with" questions come from recent git history: a tile that changed in the same commit as a sure tile at least 3 times, and in 30% or more of that tile's commits. Commits touching 5+ features are left out. The map can also list `"couples": [ids]` per feature.
+- `--format html --out FILE` draws the PLAN picture as a page with a "Confirm before coding" card. `plan --show` redraws the stored plan.
+- After plan mode, Claude shows the PLAN board and asks the user once about any maybes or couples. It then records the final list before editing.

@@ -7,7 +7,9 @@ One model, many surfaces. Every command reads the repo's map
   rb.py init [--force]              draft .readback/map.json from the repo tree
   rb.py show [RANGE] [--level L] [--lens X] [--as ROLE] [--format term|md|slack|html|json|trailer|line]
                                     [--expected a,b] [--plan TEXT|-]   (PR body with a Readback-Plan: line)
-  rb.py plan --tiles a,b [--source plan|pr]   Claude's mapping of a real plan to tiles (PLAN)
+  rb.py plan --tiles a,b [--maybe c] [--source plan|pr] [--format term|html|json] [--out F]
+                                    Claude's mapping of a real plan to tiles; draws the PLAN board
+  rb.py plan --show [--format ...]  the stored PLAN board again
   rb.py check                       validate the map; list the largest shared files to assign
   rb.py own PATH FEATURE|shared     record who owns a shared file
   rb.py hook-plan | hook-prompt | hook-done   (called by plugin hooks; JSON on stdin)
@@ -382,7 +384,42 @@ def lens_score(t, info, lens, unplanned):
     return lines
 
 
-def resolve(m, files, level="features", lens="change", expected=None, phase="DONE", kind=None, plan_text=None):
+def couples(m, ids, skip=(), n=400, min_n=3, share=0.3):
+    """Feature tiles that usually change in the same commit as a planned one, from recent
+    history (sweeps of 5+ features say nothing), plus any the map lists under "couples"."""
+    feats = {t["id"]: t for t in m["levels"]["features"]["tiles"]}
+    ids = [i for i in ids if i in feats]
+    if not ids:
+        return []
+    alone, together = {}, {}
+    for chunk in git(["log", "-n", str(n), "--no-merges", "--name-only", "--format=%x1e"]).split("\x1e"):
+        hit = [tile_of(m, "features", p.strip()) for p in chunk.splitlines() if p.strip() and not re.search(TOOLING_RE, p.strip())]
+        ts = {t["id"] for t in hit if t}
+        if not ts or len(ts) > 4:
+            continue
+        for a in ts.intersection(ids):
+            alone[a] = alone.get(a, 0) + 1
+            for b in ts - {a}:
+                together[(a, b)] = together.get((a, b), 0) + 1
+    seen, out = set(ids) | set(skip), []
+    for a in ids:
+        for b in feats[a].get("couples", []):
+            if b in feats and b not in seen:
+                seen.add(b)
+                out.append({"tile": b, "name": feats[b]["name"], "with": a, "with_name": feats[a]["name"], "n": None, "of": None})
+    for (a, b), c in sorted(together.items(), key=lambda kv: -kv[1]):
+        if b not in seen and c >= min_n and c >= share * alone[a]:
+            seen.add(b)
+            out.append({"tile": b, "name": feats[b]["name"], "with": a, "with_name": feats[a]["name"], "n": c, "of": alone[a]})
+    return out[:3]
+
+
+def couple_text(c):
+    why = " (%d of %d recent commits)" % (c["n"], c["of"]) if c["n"] else " (per the map)"
+    return c["name"] + " usually changes with " + c["with_name"] + why + ". Include it?"
+
+
+def resolve(m, files, level="features", lens="change", expected=None, phase="DONE", kind=None, plan_text=None, maybe=None):
     tiles = m["levels"][level]["tiles"]
     kind = kind or {"kind": "product", "says": ""}
     quiet = kind["kind"] != "product" and phase != "PLAN"
@@ -404,6 +441,8 @@ def resolve(m, files, level="features", lens="change", expected=None, phase="DON
     for e in touched.values():
         e["brushed"] = not e["sweep"] and len(touched) > 1 and e["lines"] <= max(3, 0.03 * top) and e["lines"] < top
     expected = set(expected or []) if not quiet else set()
+    # Tiles Claude was less sure of: a dotted ring, never an "unplanned" or "untouched" flag
+    maybe = set(maybe or []) - expected if not quiet else set()
     # Flags need a confidence bar: a tile whose files the plan names was planned, and a
     # planned tile is not called untouched once any file the plan names has changed
     named = {tid: any(named_in(plan_text, p) for p in e["paths"]) for tid, e in touched.items()}
@@ -414,7 +453,7 @@ def resolve(m, files, level="features", lens="change", expected=None, phase="DON
     scores = {}
     for t in tiles:
         if t["id"] in touched and not touched[t["id"]]["brushed"]:
-            unpl = bool(expected) and t["id"] not in expected and not named.get(t["id"])
+            unpl = bool(expected) and t["id"] not in expected | maybe and not named.get(t["id"])
             scores[t["id"]] = lens_score(t, touched[t["id"]], lens, unpl)
     if quiet and level == "features":
         scores = {}  # no product change: nothing to headline at the feature level
@@ -440,10 +479,10 @@ def resolve(m, files, level="features", lens="change", expected=None, phase="DON
             "brushed": bool(info and info["brushed"]), "quiet": bool(info) and quiet and level == "features",
             "lines": info["lines"] if info else 0, "files": info["files"] if info else 0,
             "paths": (info or {}).get("paths", [])[:8],
-            "fill": fill.get(tid, "none"), "ring": tid in expected,
+            "fill": fill.get(tid, "none"), "ring": tid in expected or tid in maybe, "maybe": tid in maybe,
             "disc": discs.get(tid),
             "risk_lines": (info or {}).get("risk_lines", 0),
-            "unplanned": bool(info) and not info["brushed"] and bool(expected) and tid not in expected and not named.get(tid) and phase != "PLAN",
+            "unplanned": bool(info) and not info["brushed"] and bool(expected) and tid not in expected | maybe and not named.get(tid) and phase != "PLAN",
             "missed": tid in expected and not (info and not info["brushed"]) and not plan_files_changed and phase != "PLAN",
             "risk": t.get("risk"), "money": t.get("money"), "owner": t.get("owner", ""),
             "audience": t.get("audience", "customer")})
@@ -464,10 +503,12 @@ def sentence(board, lens, phase, kind=None):
             return lead + " Riskiest part: " + by[1]["name"] + " " + DISC[0] + "."
         return lead
     by = {b["disc"]: b for b in board if b["disc"]}
+    mb = [b["name"] for b in board if b.get("maybe")]
+    ask = (" Maybe: " + ", ".join(mb[:4]) + " (confirm before coding).") if mb and phase == "PLAN" else ""
     if not by:
         if any(b["touched"] for b in board):
             return "Only sweeps here (many tiny edits); nothing stands out for this lens."
-        return "Nothing at this level changed." if phase != "PLAN" else "No tiles predicted yet."
+        return "Nothing at this level changed." if phase != "PLAN" else ("Nothing certain yet." + ask if mb else "No tiles predicted yet.")
     verb = {"change": "changed most", "risk": "carries the most risk", "money": "touches money",
             "owner": "needs its owner"}[lens]
     if phase == "PLAN":
@@ -476,7 +517,7 @@ def sentence(board, lens, phase, kind=None):
     rest = [by[i]["name"] + " " + DISC[i - 1] for i in (2, 3) if i in by]
     if rest:
         s += "; also " + " and ".join(rest)
-    s += "."
+    s += "." + ask
     un = [b["name"] for b in board if b["unplanned"]]
     if un:
         s += " Not in the plan: " + ", ".join(un[:3]) + "."
@@ -509,11 +550,11 @@ def acts(m, board, lens, kind=None):
     return uniq[:7]
 
 
-def atlas(m, files, expected_by_level, kind=None, plan_text=None):
+def atlas(m, files, expected_by_level, kind=None, plan_text=None, maybe_by_level=None):
     cells = {}
     for lv in LEVELS:
         for ln in LENSES:
-            b = resolve(m, files, lv, ln, expected_by_level.get(lv), kind=kind, plan_text=plan_text)
+            b = resolve(m, files, lv, ln, expected_by_level.get(lv), kind=kind, plan_text=plan_text, maybe=(maybe_by_level or {}).get(lv))
             mark = "○"
             if any(t["fill"] != "none" for t in b["tiles"]):
                 mark = "◐"
@@ -539,12 +580,12 @@ def render_term(b, width=80):
     for line in wrap(b["sentence"], width):
         L.append(line)
     L.append("")
-    shown = sorted([t for t in b["tiles"] if shown_tile(t)], key=lambda t: (t["disc"] or 9, {"strong": 0, "light": 1}.get(t["fill"], 2), -t["lines"]))
-    rest = [t for t in b["tiles"] if not (t["touched"] or t["ring"])]
+    shown = sorted([t for t in b["tiles"] if shown_tile(t, b["phase"])], key=lambda t: (t["disc"] or 9, {"strong": 0, "light": 1}.get(t["fill"], 2), -t["lines"]))
+    rest = [t for t in b["tiles"] if not t["touched"] and not shown_tile(t, b["phase"])]
     for t in shown:
-        mark = "◯" if t["ring"] else " "
+        mark = "◌" if t.get("maybe") else ("◯" if t["ring"] else " ")
         disc = DISC[t["disc"] - 1] if t["disc"] else " "
-        tag = "sweep" if t["sweep"] else ("unplanned" if t["unplanned"] else ("not touched" if t["missed"] else ""))
+        tag = "sweep" if t["sweep"] else ("unplanned" if t["unplanned"] else ("not touched" if t["missed"] else ("maybe" if t.get("maybe") and b["phase"] == "PLAN" else "")))
         meta = (plural(t["files"], "file") + ", " + plural(t["lines"], "line")) if t["touched"] and b["phase"] != "PLAN" else ""
         L.append((" " + disc + " " + mark + " " + bar(t["fill"]) + " " + t["name"].ljust(22)[:22] + " " + meta.ljust(22) + " " + tag)[:width].rstrip())
     quiet = [t["name"] for t in b["tiles"] if t.get("quiet")]
@@ -555,6 +596,11 @@ def render_term(b, width=80):
         L.append(("   · brushed: " + ", ".join(brushed))[:width])
     if rest:
         L.append(("   · untouched: " + ", ".join(t["name"] for t in rest))[:width])
+    if b.get("couples"):
+        L.append("")
+        for c in b["couples"]:
+            for i, line in enumerate(wrap(couple_text(c), width - 5)):
+                L.append(("   ? " if i == 0 else "     ") + line)
     if b["acts"]:
         L.append("")
         for a in b["acts"]:
@@ -564,13 +610,17 @@ def render_term(b, width=80):
             L.append(("   + " + str(len(b["unmapped"])) + " shared files (no single feature)")[:width])
         else:
             L.append(("   ? " + str(len(b["unmapped"])) + " files not on the map - run /readback check")[:width])
-    L.append("   key: █ strong ▒ light ◯ expected ①②③ in sentence")
+    if b["phase"] == "PLAN":
+        L.append("   key: ◯ will change ◌ maybe, confirm ①②③ in sentence")
+    else:
+        L.append("   key: █ strong ▒ light ◯ expected " + ("◌ maybe " if any(t.get("maybe") for t in b["tiles"]) else "") + "①②③ in sentence")
     return "\n".join(L)
 
 
-def shown_tile(t):
-    """Tiles drawn as touched: real work, not code-only (no product change) or a one-line brush."""
-    return (t["touched"] and not t.get("quiet") and not t.get("brushed")) or t["ring"]
+def shown_tile(t, phase="DONE"):
+    """Tiles drawn as touched: real work, not code-only (no product change) or a one-line brush,
+    plus planned tiles; a 'maybe' that never happened is just untouched once the work is done."""
+    return (t["touched"] and not t.get("quiet") and not t.get("brushed")) or (t["ring"] and (phase == "PLAN" or not t.get("maybe")))
 
 
 def render_line(b):
@@ -604,7 +654,7 @@ def render_md(boards, atl=None):
         L.append("**" + bb["level"].title() + " · " + bb["lens"].title() + "**  ")
         cells = []
         for t in bb["tiles"]:
-            if not shown_tile(t):
+            if not shown_tile(t, bb["phase"]):
                 continue
             f = {"strong": "🟪", "light": "🟣", "none": "⬜"}[t["fill"]] if not t["sweep"] else "▫️"
             d = DISC[t["disc"] - 1] if t["disc"] else ""
@@ -653,12 +703,14 @@ def svg_board(b):
     for i, t in enumerate(tiles):
         x, y = G + (i % cols) * (W + G), G + (i // cols) * (H + G)
         cls = "t " + ("touched " if t["touched"] else "un ") + ("sweep " if t["sweep"] else "") + "f-" + t["fill"]
-        if t["ring"]:
-            out.append('<rect class="ring" x="%d" y="%d" width="%d" height="%d" rx="12"/>' % (x - 5, y - 5, W + 10, H + 10))
+        if t["ring"] and (b["phase"] == "PLAN" or t["touched"] or not t.get("maybe")):
+            out.append('<rect class="ring%s" x="%d" y="%d" width="%d" height="%d" rx="12"/>' % (" maybe" if t.get("maybe") else "", x - 5, y - 5, W + 10, H + 10))
         out.append('<g class="%s"><rect x="%d" y="%d" width="%d" height="%d" rx="9"/>' % (cls, x, y, W, H))
         out.append('<text class="nm" x="%d" y="%d">%s</text>' % (x + 12, y + 28, html.escape(t["name"][:20])))
         sub = "sweep" if t["sweep"] else ("code only" if t.get("quiet") else ("brushed" if t.get("brushed") else None))
         sub = sub or ("unplanned" if t["unplanned"] else ("planned, untouched" if t["missed"] else (str(t["files"]) + " files" if t["touched"] and b["phase"] != "PLAN" else "")))
+        if b["phase"] == "PLAN":
+            sub = "maybe, confirm" if t.get("maybe") else ("will change" if t["ring"] else "")
         out.append('<text class="sb" x="%d" y="%d">%s</text></g>' % (x + 12, y + 50, html.escape(sub)))
         if t["disc"]:
             out.append('<g class="disc"><circle cx="%d" cy="%d" r="11"/><text x="%d" y="%d">%d</text></g>' % (x + W - 4, y + 4, x + W - 4, y + 8, t["disc"]))
@@ -679,7 +731,7 @@ svg.board{width:100%;height:auto;display:block}
 .t rect{fill:var(--card);stroke:var(--ink);stroke-width:1.6}.t.un rect{fill:none;stroke:var(--line);stroke-dasharray:4 4;stroke-width:1}
 .t.sweep rect{stroke-width:.7}.t.f-light rect{fill:var(--l)}.t.f-strong rect{fill:var(--s)}
 .nm{font-size:15px;font-weight:600;fill:var(--ink)}.sb{font-size:12px;fill:var(--mut)}.un .nm{fill:var(--mut);font-weight:400}
-.f-strong .nm,.f-strong .sb{fill:var(--sink)}.ring{fill:none;stroke:var(--mut);stroke-width:1.4}
+.f-strong .nm,.f-strong .sb{fill:var(--sink)}.ring{fill:none;stroke:var(--mut);stroke-width:1.4}.ring.maybe{stroke-dasharray:1.5 4;stroke-linecap:round;stroke-width:1.8}
 .disc circle{fill:var(--ink)}.disc text{fill:var(--bg);font-size:12px;text-anchor:middle;font-weight:700}
 table{border-collapse:collapse;font-size:14px}td,th{border:1px solid var(--line);padding:6px 10px;text-align:center}
 ul.acts{padding-left:18px}.key{color:var(--mut);font-size:12px}
@@ -701,7 +753,14 @@ def render_html(boards, atl=None):
         parts.append('<section class="card"><div class="who">Atlas</div><table><tr><th></th>' + "".join("<th>" + l.title() + "</th>" for l in LENSES) + "</tr>" + rows + "</table></section>")
     if b["acts"]:
         parts.append('<section class="card"><div class="who">Before launch</div><ul class="acts">' + "".join("<li><b>" + html.escape(a["who"]) + "</b>: " + html.escape(a["do"]) + "</li>" for a in b["acts"]) + "</ul></section>")
-    parts.append('<p class="key">Solid outline = touched · dashed = untouched · fill = answer for the lens · ring = expected · numbers = cited in the sentence</p></main></body></html>')
+    if b["phase"] == "PLAN":
+        ask = ["<li><b>" + html.escape(t["name"]) + "</b>: maybe. Will it change?</li>" for t in b["tiles"] if t.get("maybe")]
+        ask += ["<li>" + html.escape(couple_text(c)) + "</li>" for c in b.get("couples", [])]
+        if ask:
+            parts.append('<section class="card"><div class="who">Confirm before coding</div><ul class="acts">' + "".join(ask) + "</ul></section>")
+        parts.append('<p class="key">Solid ring = will change · dotted ring = maybe, confirm · dashed = not planned · numbers = cited in the sentence</p></main></body></html>')
+    else:
+        parts.append('<p class="key">Solid outline = touched · dashed = untouched · fill = answer for the lens · ring = expected · dotted ring = maybe · numbers = cited in the sentence</p></main></body></html>')
     return "".join(parts)
 
 
@@ -743,19 +802,21 @@ def save_run(root, run):
         json.dump(run, f, indent=1)
 
 
-def record_plan(root, m, text, source, tiles=None):
+def record_plan(root, m, text, source, tiles=None, maybe=None):
     """Keep the plan text; only a real plan (ExitPlanMode, a PR body) mapped to tiles
-    by Claude sets expectations. The opening prompt is context, never a plan."""
+    by Claude sets expectations. The opening prompt is context, never a plan.
+    tiles = Claude is confident they change; maybe = less sure, for the user to confirm."""
     run = load_run(root)
     if source == "prompt":
         if run.get("source") in REAL_PLANS:
             return run  # a real plan beats the opening prompt
-        run.update({"source": "prompt", "text": text[:4000], "expected": {}})
+        run.update({"source": "prompt", "text": text[:4000], "expected": {}, "maybe": {}})
     else:
         if text:
             run["text"] = text[:4000]
         run["source"] = source
         run["expected"] = expected_from_tiles(m, tiles) if tiles is not None else {}
+        run["maybe"] = expected_from_tiles(m, maybe) if maybe else {}
         run["mapped"] = tiles is not None
     save_run(root, run)
     return run
@@ -776,8 +837,13 @@ def plan_expected(run):
     return run.get("expected", {}) if run.get("source") in REAL_PLANS else {}
 
 
+def plan_maybe(run):
+    run = run or {}
+    return run.get("maybe", {}) if run.get("source") in REAL_PLANS else {}
+
+
 def boards_for(m, files, run, level, lens, phase="DONE", kind=None):
-    return resolve(m, files, level, lens, plan_expected(run).get(level), phase, kind, (run or {}).get("text"))
+    return resolve(m, files, level, lens, plan_expected(run).get(level), phase, kind, (run or {}).get("text"), plan_maybe(run).get(level))
 
 
 def cmd_show(argv):
@@ -820,17 +886,10 @@ def cmd_show(argv):
     elif fmt == "trailer":
         print(render_trailer(b))
     elif fmt in ("md", "html"):
-        exp = plan_expected(run)
-        boards = [b] + [resolve(m, files, lv, ln, exp.get(lv), kind=kind, plan_text=run.get("text")) for lv, ln in (("parts", "risk"), ("features", "money")) if (lv, ln) != (level, lens)]
-        atl = atlas(m, files, exp, kind, run.get("text"))
-        out = render_md(boards, atl) if fmt == "md" else render_html(boards, atl)
-        dest = args_get(argv, "--out")
-        if dest:
-            with open(dest, "w", encoding="utf-8") as f:
-                f.write(out)
-            print(dest)
-        else:
-            print(out)
+        exp, mb = plan_expected(run), plan_maybe(run)
+        boards = [b] + [resolve(m, files, lv, ln, exp.get(lv), kind=kind, plan_text=run.get("text"), maybe=mb.get(lv)) for lv, ln in (("parts", "risk"), ("features", "money")) if (lv, ln) != (level, lens)]
+        atl = atlas(m, files, exp, kind, run.get("text"), mb)
+        write_out(render_md(boards, atl) if fmt == "md" else render_html(boards, atl), args_get(argv, "--out"))
     elif fmt == "slack":
         print(json.dumps(render_slack(b, args_get(argv, "--link", "")), indent=1))
     else:
@@ -923,19 +982,47 @@ def cmd_own(argv):
     print("%s -> %s" % (path, tid))
 
 
+def write_out(out, dest):
+    if dest:
+        with open(dest, "w", encoding="utf-8") as f:
+            f.write(out)
+        print(dest)
+    else:
+        print(out)
+
+
+def plan_boards(m, run):
+    """The PLAN picture: rings from the mapped plan, before any code exists."""
+    exp, mb = run.get("expected", {}), run.get("maybe", {})
+    boards = [resolve(m, {}, lv, "change", exp.get(lv), "PLAN", maybe=mb.get(lv)) for lv in LEVELS]
+    boards[0]["couples"] = couples(m, exp.get("features", []), mb.get("features", []))
+    return boards
+
+
 def cmd_plan(argv):
-    """rb.py plan --tiles a,b [--source plan|pr]   Claude's mapping of the plan
-       rb.py plan TEXT|-                           store the text; Claude still has to map it"""
+    """rb.py plan --tiles a,b [--maybe c,d] [--source plan|pr] [--format term|html|json] [--out FILE]
+                                                Claude's mapping of the plan; prints the PLAN board
+       rb.py plan --show [--format ...]         the stored PLAN board again
+       rb.py plan TEXT|-                        store the text; Claude still has to map it"""
     root = repo_root()
+    os.chdir(root)
     m = load_map(root)
     if not m:
         print("No map yet. Run /readback init first.")
         return
     src = args_get(argv, "--source", "plan")
     tl = args_get(argv, "--tiles")
-    if tl is not None:
-        run = record_plan(root, m, "", src, [x for x in tl.split(",") if x.strip()])
-        print(render_term(resolve(m, {}, "features", "change", run["expected"].get("features"), "PLAN")))
+    if tl is not None or "--show" in argv:
+        split = lambda s: [x for x in (s or "").split(",") if x.strip()]
+        run = record_plan(root, m, "", src, split(tl), split(args_get(argv, "--maybe"))) if tl is not None else load_run(root)
+        boards = plan_boards(m, run)
+        fmt = args_get(argv, "--format", "term")
+        if fmt == "json":
+            print(json.dumps(boards[0], indent=1))
+        elif fmt == "html":
+            write_out(render_html(boards), args_get(argv, "--out"))
+        else:
+            print(render_term(boards[0]))
         return
     text = sys.stdin.read() if argv == ["-"] else " ".join(argv)
     record_plan(root, m, text, src)
@@ -943,10 +1030,13 @@ def cmd_plan(argv):
 
 
 def map_request(m):
-    return ("Readback: map this plan to the product map. Pick only the tiles the plan says it will change "
-            "(features and parts; leave out anything it does not ask for):\n" + tile_list(m) +
-            "\nThen run: python \"" + os.path.abspath(__file__) + "\" plan --tiles id1,id2,...  "
-            "Do this before editing; do not mention it to the user unless asked.")
+    return ("Readback: map this plan to the product map before editing. Pick only the tiles the plan says it will change "
+            "(features and parts; leave out anything it does not ask for). Put tiles you are sure of in --tiles and "
+            "tiles you are only partly sure of in --maybe:\n" + tile_list(m) +
+            "\nThen run: python \"" + os.path.abspath(__file__) + "\" plan --tiles id1,id2 --maybe id3  "
+            "and show the user the PLAN board it prints, in a code block. If it has maybe tiles or a "
+            "'usually changes with' question, ask the user once which to include, then run plan --tiles again "
+            "with the final list (no --maybe) before editing. Otherwise carry on.")
 
 
 def hook_input():
