@@ -46,6 +46,7 @@ Needs Python 3.8+ and git. No other dependencies.
 /readback --format html           shareable page in .readback/board.html
 /readback check                   coverage, then asks who owns the largest shared files
 /readback plan                    map the current plan to tiles and draw the PLAN board
+/readback stats                   how plans held up: your answers to the plan questions, plan vs done
 ```
 
 ## Reading the board
@@ -58,6 +59,14 @@ PR body with a `Readback-Plan:` line) · "code only, no product change" = a refa
 or tooling change (from commit messages and the file mix), shown without money or plan flags ·
 "brushed" = a tiny incidental touch. The headline ranks customer-facing tiles first; mark internal
 tiles with `"audience": "internal"` in the map.
+
+## How well the plan held up
+
+Each mapped plan, your answers to its questions, and the latest DONE board for it go to
+`.readback/log.jsonl`. The file holds tile ids and counts only (no code, no plan text), stays on
+your machine and is gitignored. `/readback stats` reads it: how many maybe tiles you kept, how
+many "usually changes with" tiles you took, how often you corrected a plan (dropped a sure tile or
+added a missing one), and how many planned tiles really changed.
 
 ## Pull requests and Slack
 

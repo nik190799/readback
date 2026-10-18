@@ -10,13 +10,14 @@ One model, many surfaces. Every command reads the repo's map
   rb.py plan --tiles a,b [--maybe c] [--source plan|pr] [--format term|html|json] [--out F]
                                     Claude's mapping of a real plan to tiles; draws the PLAN board
   rb.py plan --show [--format ...]  the stored PLAN board again
+  rb.py stats [--format json]       how plans held up: answers to the plan questions, plan vs done
   rb.py check                       validate the map; list the largest shared files to assign
   rb.py own PATH FEATURE|shared     record who owns a shared file
   rb.py hook-plan | hook-prompt | hook-done   (called by plugin hooks; JSON on stdin)
 
 No dependencies beyond Python 3.8 and git.
 """
-import fnmatch, hashlib, html, json, os, re, subprocess, sys
+import fnmatch, hashlib, html, json, os, re, subprocess, sys, time
 
 try:
     sys.stdout.reconfigure(encoding="utf-8")
@@ -488,7 +489,7 @@ def resolve(m, files, level="features", lens="change", expected=None, phase="DON
             "audience": t.get("audience", "customer")})
     return {"product": m.get("product", ""), "level": level, "lens": lens, "phase": phase,
             "kind": kind["kind"], "tiles": board, "unmapped": unmapped, "files": len(files),
-            "sentence": sentence(board, lens, phase, kind), "acts": acts(m, board, lens, kind)}
+            "sentence": sentence(board, lens, phase, kind), "acts": acts(m, board, lens, kind, phase)}
 
 
 def sentence(board, lens, phase, kind=None):
@@ -527,11 +528,18 @@ def sentence(board, lens, phase, kind=None):
     return s
 
 
-def acts(m, board, lens, kind=None):
+def acts(m, board, lens, kind=None, phase="DONE"):
     product = (kind or {"kind": "product"})["kind"] == "product"
     out = []
     for b in board:
         if not b["touched"] or b["sweep"] or b.get("brushed"):
+            continue
+        if phase == "PLAN":
+            # nothing is built yet: a heads-up for who will be needed, not a check to do now
+            if b["risk"] == "high":
+                out.append({"who": b["owner"] or "engineer", "do": "Plan a review of " + b["name"] + " (high risk)", "why": "risk", "tile": b["id"]})
+            if b["money"]:
+                out.append({"who": "finance", "do": b["name"] + " touches money, expect a check", "why": "money", "tile": b["id"]})
             continue
         if b["risk"] == "high" and b.get("risk_lines", b["lines"]) >= 10:
             out.append({"who": b["owner"] or "engineer", "do": "Review " + b["name"] + " before merge", "why": "risk", "tile": b["id"]})
@@ -595,7 +603,7 @@ def render_term(b, width=80):
     if brushed:
         L.append(("   · brushed: " + ", ".join(brushed))[:width])
     if rest:
-        L.append(("   · untouched: " + ", ".join(t["name"] for t in rest))[:width])
+        L.append(("   · " + ("not in the plan" if b["phase"] == "PLAN" else "untouched") + ": " + ", ".join(t["name"] for t in rest))[:width])
     if b.get("couples"):
         L.append("")
         for c in b["couples"]:
@@ -672,7 +680,7 @@ def render_md(boards, atl=None):
             L.append("| " + lv.title() + " | " + " | ".join(atl[lv + "|" + ln] for ln in LENSES) + " |")
         L.append("")
     if b["acts"]:
-        L.append("**Before launch**")
+        L.append("**Heads-up**" if b["phase"] == "PLAN" else "**Before launch**")
         for a in b["acts"]:
             L.append("- [ ] **" + a["who"] + "**: " + a["do"])
         L.append("")
@@ -752,7 +760,7 @@ def render_html(boards, atl=None):
         rows = "".join("<tr><th>" + lv.title() + "</th>" + "".join("<td>" + atl[lv + "|" + ln] + "</td>" for ln in LENSES) + "</tr>" for lv in LEVELS)
         parts.append('<section class="card"><div class="who">Atlas</div><table><tr><th></th>' + "".join("<th>" + l.title() + "</th>" for l in LENSES) + "</tr>" + rows + "</table></section>")
     if b["acts"]:
-        parts.append('<section class="card"><div class="who">Before launch</div><ul class="acts">' + "".join("<li><b>" + html.escape(a["who"]) + "</b>: " + html.escape(a["do"]) + "</li>" for a in b["acts"]) + "</ul></section>")
+        parts.append('<section class="card"><div class="who">' + ("Heads-up" if b["phase"] == "PLAN" else "Before launch") + '</div><ul class="acts">' + "".join("<li><b>" + html.escape(a["who"]) + "</b>: " + html.escape(a["do"]) + "</li>" for a in b["acts"]) + "</ul></section>")
     if b["phase"] == "PLAN":
         ask = ["<li><b>" + html.escape(t["name"]) + "</b>: maybe. Will it change?</li>" for t in b["tiles"] if t.get("maybe")]
         ask += ["<li>" + html.escape(couple_text(c)) + "</li>" for c in b.get("couples", [])]
@@ -811,6 +819,7 @@ def record_plan(root, m, text, source, tiles=None, maybe=None):
         if run.get("source") in REAL_PLANS:
             return run  # a real plan beats the opening prompt
         run.update({"source": "prompt", "text": text[:4000], "expected": {}, "maybe": {}})
+        run.pop("draft", None)
     else:
         if text:
             run["text"] = text[:4000]
@@ -818,8 +827,116 @@ def record_plan(root, m, text, source, tiles=None, maybe=None):
         run["expected"] = expected_from_tiles(m, tiles) if tiles is not None else {}
         run["maybe"] = expected_from_tiles(m, maybe) if maybe else {}
         run["mapped"] = tiles is not None
+        if tiles is None:
+            run.pop("draft", None)
     save_run(root, run)
     return run
+
+
+# ---------------------------------------------------------------- log (how plans held up)
+def log_path(root):
+    return os.path.join(root, ".readback", "log.jsonl")
+
+
+def log_event(root, ev):
+    """Local only (.readback/log.jsonl, gitignored): tile ids and counts, no code or plan text."""
+    try:
+        gi = os.path.join(root, ".readback", ".gitignore")
+        old = open(gi, encoding="utf-8").read() if os.path.exists(gi) else ""
+        if "log.jsonl" not in old.split():
+            with open(gi, "a", encoding="utf-8") as f:
+                f.write(("\n" if old and not old.endswith("\n") else "") + "log.jsonl\n")
+        with open(log_path(root), "a", encoding="utf-8") as f:
+            f.write(json.dumps(dict(ev, t=int(time.time()), branch=branch())) + "\n")
+    except OSError:
+        pass  # the log is a nice-to-have; never break a board over it
+
+
+def note_plan(root, prev, run, cpl):
+    """Log each mapped plan. A rerun with no --maybe right after a draft that asked questions
+    is the user's answer: which maybes they kept, which couples they took, what they changed."""
+    sure = run.get("expected", {}).get("features", [])
+    maybe = run.get("maybe", {}).get("features", [])
+    draft = prev.get("draft")
+    if draft and not maybe:
+        final, asked_m, asked_c, was = set(sure), set(draft["maybe"]), set(draft["couples"]), set(draft["tiles"])
+        log_event(root, {"ev": "confirm", "plan": draft["id"], "kept": sorted(asked_m & final), "dropped": sorted(asked_m - final),
+                         "couple_yes": sorted(asked_c & final), "couple_no": sorted(asked_c - final),
+                         "sure_dropped": sorted(was - final), "added": sorted(final - was - asked_m - asked_c)})
+        run["plan_id"] = draft["id"]
+        run.pop("draft", None)
+        return
+    pid = hashlib.sha1((branch() + repr(time.time())).encode()).hexdigest()[:8]
+    asked_c = [c["tile"] for c in cpl]
+    log_event(root, {"ev": "plan", "plan": pid, "source": run.get("source"), "tiles": sure, "maybe": maybe, "couples": asked_c})
+    run["plan_id"] = pid
+    if maybe or asked_c:
+        run["draft"] = {"id": pid, "tiles": sure, "maybe": maybe, "couples": asked_c}
+    else:
+        run.pop("draft", None)
+
+
+def note_done(root, run, b):
+    """The latest DONE board for the current plan; stats keeps the last one per plan."""
+    if not run.get("plan_id") or not plan_expected(run):
+        return
+    touched = [t["id"] for t in b["tiles"] if t["touched"] and not t["sweep"] and not t.get("brushed") and not t.get("quiet")]
+    log_event(root, {"ev": "done", "plan": run["plan_id"], "kind": b["kind"], "planned": plan_expected(run).get("features", []),
+                     "maybe": plan_maybe(run).get("features", []), "touched": touched})
+
+
+def pct(a, n):
+    return "%d of %d (%d%%)" % (a, n, round(100 * a / n)) if n else "none yet"
+
+
+def cmd_stats(argv):
+    root = repo_root()
+    evs = []
+    if os.path.exists(log_path(root)):
+        with open(log_path(root), encoding="utf-8") as f:
+            for line in f:
+                try:
+                    evs.append(json.loads(line))
+                except ValueError:
+                    pass
+    plans = {e["plan"]: e for e in evs if e.get("ev") == "plan"}
+    confirms = {e["plan"]: e for e in evs if e.get("ev") == "confirm"}
+    dones = {e["plan"]: e for e in evs if e.get("ev") == "done"}  # last board per plan wins
+    asked = [p for p, e in plans.items() if e["maybe"] or e["couples"]]
+    cs = list(confirms.values())
+    n = lambda k: sum(len(c[k]) for c in cs)
+    prod = [d for d in dones.values() if d.get("kind") == "product"]
+    o = {"plans": len(plans), "asked": len(asked), "answered": len(cs), "unanswered": len([p for p in asked if p not in confirms]),
+         "maybe_kept": n("kept"), "maybe_asked": n("kept") + n("dropped"),
+         "couple_yes": n("couple_yes"), "couple_asked": n("couple_yes") + n("couple_no"),
+         "sure_dropped": n("sure_dropped"), "sure_total": sum(len(plans[c["plan"]]["tiles"]) for c in cs if c["plan"] in plans),
+         "added": n("added"), "corrected": sum(1 for c in cs if c["sure_dropped"] or c["added"]),
+         "done": len(prod), "planned": sum(len(d["planned"]) for d in prod),
+         "planned_changed": sum(len(set(d["planned"]) & set(d["touched"])) for d in prod),
+         "changed": sum(len(d["touched"]) for d in prod),
+         "changed_ringed": sum(len(set(d["touched"]) & (set(d["planned"]) | set(d["maybe"]))) for d in prod),
+         "exact": sum(1 for d in prod if set(d["planned"]) <= set(d["touched"]) <= set(d["planned"]) | set(d["maybe"])),
+         "maybe_total": sum(len(d["maybe"]) for d in prod),
+         "maybe_changed": sum(len(set(d["maybe"]) & set(d["touched"])) for d in prod)}
+    if args_get(argv, "--format") == "json":
+        print(json.dumps(o, indent=1))
+        return
+    L = ["Readback stats · " + plural(o["plans"], "plan") + " · %d asked questions · %d finished with a product change" % (o["asked"], o["done"]),
+         "─" * 78, "Plan questions (your answers before coding)",
+         "  Maybe tiles you kept           " + pct(o["maybe_kept"], o["maybe_asked"]),
+         "  'Usually changes with' taken   " + pct(o["couple_yes"], o["couple_asked"]),
+         "  Sure tiles you dropped         " + pct(o["sure_dropped"], o["sure_total"]),
+         "  Tiles you added                " + str(o["added"]),
+         "  Plans you corrected            " + pct(o["corrected"], o["answered"]) + "   gate: under 20%"]
+    if o["unanswered"]:
+        L.append("  Questions never answered       %d plan(s): Claude carried on without asking" % o["unanswered"])
+    L += ["", "Plan vs done (last board per plan)",
+          "  Planned tiles that changed     " + pct(o["planned_changed"], o["planned"]) + "   gate: 90%+",
+          "  Changed tiles that were ringed " + pct(o["changed_ringed"], o["changed"]),
+          "  Maybe tiles that changed       " + pct(o["maybe_changed"], o["maybe_total"]),
+          "  Boards that matched the plan   " + pct(o["exact"], o["done"]),
+          "", "   log: .readback/log.jsonl (local, gitignored)"]
+    print("\n".join(L))
 
 
 # ---------------------------------------------------------------- CLI
@@ -908,7 +1025,7 @@ def cmd_init(argv):
         json.dump(m, f, indent=1)
     gi = os.path.join(root, ".readback", ".gitignore")
     with open(gi, "w") as f:
-        f.write("runs/\n")
+        f.write("runs/\nlog.jsonl\n")
     print("Drafted .readback/map.json: %d features, %d parts." % (len(m["levels"]["features"]["tiles"]), len(m["levels"]["parts"]["tiles"])))
     print(cmd_check([], quiet=True))
 
@@ -1014,8 +1131,12 @@ def cmd_plan(argv):
     tl = args_get(argv, "--tiles")
     if tl is not None or "--show" in argv:
         split = lambda s: [x for x in (s or "").split(",") if x.strip()]
-        run = record_plan(root, m, "", src, split(tl), split(args_get(argv, "--maybe"))) if tl is not None else load_run(root)
+        prev = load_run(root)
+        run = record_plan(root, m, "", src, split(tl), split(args_get(argv, "--maybe"))) if tl is not None else prev
         boards = plan_boards(m, run)
+        if tl is not None:
+            note_plan(root, prev, run, boards[0].get("couples", []))
+            save_run(root, run)
         fmt = args_get(argv, "--format", "term")
         if fmt == "json":
             print(json.dumps(boards[0], indent=1))
@@ -1095,6 +1216,7 @@ def hook_done():
     run["last_shown"] = digest
     save_run(root, run)
     b = boards_for(m, files, run, "features", "change", kind=change_kind(commit_log(), files, m))
+    note_done(root, run, b)
     emit(render_term(b))
 
 
@@ -1113,6 +1235,8 @@ def main(argv):
         cmd_plan(rest)
     elif c == "own":
         cmd_own(rest)
+    elif c == "stats":
+        cmd_stats(rest)
     elif c == "hook-plan":
         hook_plan()
     elif c == "hook-prompt":

@@ -144,3 +144,5 @@ What we built from that:
 - "Usually changes with" questions come from recent git history: a tile that changed in the same commit as a sure tile at least 3 times, and in 30% or more of that tile's commits. Commits touching 5+ features are left out. The map can also list `"couples": [ids]` per feature.
 - `--format html --out FILE` draws the PLAN picture as a page with a "Confirm before coding" card. `plan --show` redraws the stored plan.
 - After plan mode, Claude shows the PLAN board and asks the user once about any maybes or couples. It then records the final list before editing.
+- Money and risk notes on the PLAN board are heads-ups ("touches money, expect a check", "plan a review"), since nothing is built yet.
+- Every mapped plan, the user's answers and the latest DONE board go to `.readback/log.jsonl` (local, gitignored, tile ids only). `rb.py stats` turns them into the two gates: plans the user corrected (target under 20%, our stand-in for the Wrong? rate) and planned tiles that changed (target 90%+).
