@@ -21,7 +21,7 @@ Bag and offers ① touches money.
 ## Install
 
 ```
-/plugin marketplace add OWNER/readback
+/plugin marketplace add nik190799/readback
 /plugin install readback@readback
 /readback init        # drafts .readback/map.json - review the tile names, commit it
 ```

@@ -19,7 +19,7 @@ jobs:
       - uses: actions/setup-python@v5
         with: { python-version: "3.11" }
       - name: Fetch Readback
-        run: curl -fsSL https://raw.githubusercontent.com/OWNER/readback/v0.2.0/bin/rb.py -o /tmp/rb.py
+        run: curl -fsSL https://raw.githubusercontent.com/nik190799/readback/v0.2.0/bin/rb.py -o /tmp/rb.py
       - name: Draw board
         env:
           PLAN: ${{ github.event.pull_request.body }}
