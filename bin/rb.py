@@ -7,23 +7,32 @@ One model, many surfaces. Every command reads the repo's map
   rb.py init [--force]              draft .readback/map.json from the repo tree
   rb.py show [RANGE] [--level L] [--lens X] [--as ROLE] [--format term|md|slack|html|json|trailer|line]
                                     [--expected a,b] [--plan TEXT|-]   (PR body with a Readback-Plan: line)
-  rb.py plan --tiles a,b [--maybe c] [--source plan|pr] [--card FILE|-] [--format term|widget|html|json] [--out F]
+  rb.py plan --tiles a,b [--maybe c] [--source plan|pr] [--card FILE|-] [--for L] [--format term|widget|html|json] [--out F]
                                     Claude's mapping of a real plan to tiles (and its card JSON); draws the
                                     "About to change" card, or the board when there is no card
   rb.py plan --show [--format ...]  the stored card or board again (widget = fragment for a visual tool)
+  rb.py show --card [RANGE] [--for dev|senior|lead|manager] [--format term|widget|html|md|json] [--link-base URL]
+                                    the "What changed" card: the plan card checked against the diff
+  rb.py deck add|prep|next|decide|summary|plan   many ideas, one card each (rb.py deck for help)
+  rb.py gaps [--days 30] [--unsure] [--label ID KIND]   where people had to ask, from this repo's sessions
+  rb.py brief [--show [--tiles a,b]]                    write / show .readback/context.md
   rb.py stats [--format json]       how plans held up: answers to the plan questions, plan vs done
   rb.py check                       validate the map; list the largest shared files to assign
   rb.py own PATH FEATURE|shared [--by a,b|all]   record who owns a shared file (and who uses it)
-  rb.py hook-plan | hook-prompt | hook-edit | hook-done   (called by plugin hooks; JSON on stdin)
+  rb.py hook-plan | hook-prompt | hook-edit | hook-done | hook-start   (called by plugin hooks; JSON on stdin)
+
+--for picks the reader: dev (everything), senior, lead, manager (headline, risk, one action). A risk or
+owner shown to one reader is carried up to every reader above.
 
 No dependencies beyond Python 3.8 and git.
 """
 import fnmatch, hashlib, html, json, os, re, subprocess, sys, time
 
-try:
-    sys.stdout.reconfigure(encoding="utf-8")
-except Exception:
-    pass
+for _s in (sys.stdout, sys.stderr):
+    try:
+        _s.reconfigure(encoding="utf-8")
+    except Exception:
+        pass
 
 LEVELS = ["features", "parts"]
 LENSES = ["change", "risk", "money", "owner"]
@@ -239,11 +248,11 @@ def draft_map(root):
     return {"version": 1, "product": name, "product_docs": pdocs,
             "levels": {"features": {"tiles": feats}, "parts": {"tiles": parts}},
             "roles": {
-                "engineer": {"home": ["parts", "change"], "acts_on": ["risk"]},
-                "pm": {"home": ["features", "change"], "acts_on": ["unplanned"]},
-                "finance": {"home": ["features", "money"], "acts_on": ["money"]},
-                "support": {"home": ["features", "change"], "acts_on": []},
-                "design": {"home": ["features", "change"], "acts_on": []}},
+                "engineer": {"home": ["parts", "change"], "acts_on": ["risk", "deps", "tests"], "for": "senior"},
+                "pm": {"home": ["features", "change"], "acts_on": ["unplanned", "metric"], "for": "lead"},
+                "finance": {"home": ["features", "money"], "acts_on": ["money"], "for": "manager"},
+                "support": {"home": ["features", "change"], "acts_on": [], "for": "lead"},
+                "design": {"home": ["features", "change"], "acts_on": [], "for": "lead"}},
             "drafted_by": "rb.py init (heuristic) - review and edit; owners approve in one PR"}
 
 
@@ -609,18 +618,18 @@ def acts(m, board, lens, kind=None, phase="DONE"):
         if phase == "PLAN":
             # nothing is built yet: a heads-up for who will be needed, not a check to do now
             if b["risk"] == "high":
-                out.append({"who": b["owner"] or "engineer", "do": "Plan a review of " + b["name"] + " (high risk)", "why": "risk", "tile": b["id"]})
+                out.append({"who": route(m, "risk", b["owner"]), "do": "Plan a review of " + b["name"] + " (high risk)", "why": "risk", "tile": b["id"]})
             if b["money"]:
-                out.append({"who": "finance", "do": b["name"] + " touches money, expect a check", "why": "money", "tile": b["id"]})
+                out.append({"who": route(m, "money"), "do": b["name"] + " touches money, expect a check", "why": "money", "tile": b["id"]})
             continue
         if b["risk"] == "high" and b.get("risk_lines", b["lines"]) >= 10:
-            out.append({"who": b["owner"] or "engineer", "do": "Review " + b["name"] + " before merge", "why": "risk", "tile": b["id"]})
+            out.append({"who": route(m, "risk", b["owner"]), "do": "Review " + b["name"] + " before merge", "why": "risk", "tile": b["id"]})
         if not product:
             continue  # no product change: no money or plan questions to ask anyone
         if b["money"]:
-            out.append({"who": "finance", "do": "Check money impact in " + b["name"], "why": "money", "tile": b["id"]})
+            out.append({"who": route(m, "money"), "do": "Check money impact in " + b["name"], "why": "money", "tile": b["id"]})
         if b["unplanned"]:
-            out.append({"who": "pm", "do": "Confirm the unplanned change to " + b["name"], "why": "unplanned", "tile": b["id"]})
+            out.append({"who": route(m, "unplanned"), "do": "Confirm the unplanned change to " + b["name"], "why": "unplanned", "tile": b["id"]})
     seen, uniq = set(), []
     for a in out:
         k = (a["who"], a["tile"], a["why"])
@@ -945,7 +954,7 @@ def validate_card(m, card):
         near = [clip(x, 14, "reach", warn) for x in (rc.get("near") or [])[:3]]
         people = [clip(x, 14, "reach", warn) for x in (rc.get("people") or [])[:3]]
         if rc.get("core") and (near or people):
-            out["reach"] = {"core": clip(rc["core"], 10, "reach core", warn), "near": near, "people": people}
+            out["reach"] = {"core": clip(rc["core"], 12, "reach core", warn), "near": near, "people": people}
         else:
             warn.append("reach needs a core and some near or people; left out.")
     ba = card.get("before_after")
@@ -959,11 +968,24 @@ def validate_card(m, card):
         else:
             warn.append("before_after needs both before and after; left out.")
 
+    # Tiles the plan says must stay as they are; the "What changed" card flags them if they move
+    keep = []
+    for k in card.get("keep") or []:
+        t = by.get(str(k).lower())
+        if not t:
+            warn.append('keep tile "%s" is not on the map; ignored.' % k)
+        elif t["id"] in {i["tile"] for i in items}:
+            warn.append('keep tile "%s" is also an item; a tile can\'t both change and stay; ignored.' % k)
+        elif t["id"] not in keep:
+            keep.append(t["id"])
+    if keep:
+        out["keep"] = keep
+
     acts_in = card.get("acts") if isinstance(card.get("acts"), dict) else {}
     out["acts"] = {k: clip(acts_in.get(k), 80, "acts." + k, warn) for k, _ in SLOTS if acts_in.get(k)}
     # A guessed risk never stands as a claim: it becomes a question for the author before work starts
     if out["risk"] and out["risk"]["source"] == "possible" and not out["acts"].get("start"):
-        out["acts"]["start"] = clip("Ask the author: " + out["risk"]["text"].rstrip(".") + "?", 80, "acts.start", [])
+        out["acts"]["start"] = "Ask the author: " + out["risk"]["text"].rstrip(".…") + "?"  # whole risk, never cut
     return out, warn
 
 
@@ -1005,12 +1027,148 @@ def pick_sketches(m, card, keys):
     return sev, ["tree"] + cands[:{"low": 0, "medium": 1, "high": 2}[sev]]
 
 
-def card_model(m, run):
+def card_model(m, run, level="dev"):
     card = run["card"]
     keys = card_tiles(run)
     sev, sk = pick_sketches(m, card, keys)
-    return dict(card, product=m.get("product", "") or "Product", keys=keys, severity=sev, sketches=sk,
-                kind=KIND_LABEL[sk[1] if len(sk) > 1 else "tree"], tree=tree_nodes(m, run))
+    kind = KIND_LABEL[sk[1] if len(sk) > 1 else "tree"]
+    base = dict(card, phase="PLAN", product=m.get("product", "") or "Product", keys=keys, severity=sev, sketches=sk,
+                kind=kind, tree=tree_nodes(m, run), meta=[sev, kind],
+                slots=[(name, [card["acts"][k]]) for k, name in SLOTS if card["acts"].get(k)])
+    return leveled(base, level)
+
+
+# ---------------------------------------------------------------- reader levels
+# One card, squeezed for who reads it. Anything risky or owned that a lower level shows is carried up
+# to every level above it, so a manager never sees less danger than the developer did.
+READERS = ("dev", "senior", "lead", "manager")
+READER_FOR = {"engineer": "senior", "pm": "lead", "support": "lead", "design": "lead", "finance": "manager"}
+TREE_BUDGET = {"dev": 12, "senior": 8, "lead": 5, "manager": 0}
+LOUD = ("risk", "group-risk", "unplanned", "keep", "missed", "collide")
+CARRY_SAYS = {"risk": "%s carries the risk", "group-risk": "%s carries the risk", "unplanned": "%s changed outside the plan",
+              "keep": "%s changed though the plan said leave it alone", "missed": "%s was planned but not touched",
+              "collide": "%s is changed by more than one idea"}
+COUNTS_RE = r" · \d+ files?, \d+ lines?$"
+
+
+def reader_level(m, argv):
+    lv = args_get(argv, "--for")
+    if lv in READERS:
+        return lv
+    if lv:
+        sys.stderr.write("Readback: --for is one of " + "|".join(READERS) + "; used dev.\n")
+        return "dev"
+    role = args_get(argv, "--as")
+    if not role:
+        return "dev"
+    return ((m.get("roles") or {}).get(role) or {}).get("for") or READER_FOR.get(role, "dev")
+
+
+def collapse_tree(rows):
+    """Lead and manager: one row per tile. A tile with several items becomes 'Name · 3 changes'."""
+    out, i = [], 0
+    while i < len(rows):
+        d, label, mark = rows[i]
+        if mark == "note":
+            i += 1
+            continue
+        if mark in ("group", "group-risk"):
+            j = i + 1
+            while j < len(rows) and rows[j][0] > d:
+                j += 1
+            kids = rows[i + 1:j]
+            loud = mark == "group-risk" or any(k[2] in LOUD for k in kids)
+            out.append((d, label + " · " + plural(len(kids), "change"), "risk" if loud else "change"))
+            i = j
+            continue
+        out.append(rows[i])
+        i += 1
+    return out
+
+
+def squeeze_tree(rows, budget):
+    """Keep the root, every loud row and its parents, then rows in order; the rest become '+N more'."""
+    if len(rows) <= budget:
+        return rows
+
+    def parents(i):
+        out, d = [], rows[i][0]
+        for j in range(i - 1, -1, -1):
+            if rows[j][0] < d:
+                out.append(j)
+                d = rows[j][0]
+        return out
+    keep = {0}
+    for i, r in enumerate(rows):
+        if r[2] in LOUD:
+            keep.update([i] + parents(i))
+    for i in range(len(rows)):
+        if len(keep) >= budget - 1:
+            break
+        keep.update([i] + parents(i))
+    dropped = len([r for i, r in enumerate(rows) if i not in keep and r[2] not in ("area", "note")])
+    out = [rows[i] for i in sorted(keep)]
+    return out + ([(1, "+%d more" % dropped, "more")] if dropped else [])
+
+
+def for_level(c, level):
+    c = dict(c, level=level, carried=list(c.get("carried", [])))
+    tree = c["tree"] if level == "dev" else [(d, re.sub(COUNTS_RE, "", l), mk) for d, l, mk in c["tree"]]
+    if level in ("lead", "manager"):
+        tree = collapse_tree(tree)
+    c["tree"] = squeeze_tree(tree, TREE_BUDGET[level]) if level != "manager" else []
+    rest = [s for s in c["sketches"] if s != "tree"]
+    if level == "senior":
+        rest.sort(key=lambda s: s not in ("layers", "radius"))  # what it touches underneath comes first
+    has_tree = "tree" in c["sketches"]
+    c["sketches"] = (["tree"] if has_tree else []) + rest if level in ("dev", "senior") else (["tree"] if has_tree and level == "lead" else [])
+    if level in ("lead", "manager"):
+        c["evidence"], c["lines"] = [], c["lines"] if c.get("phase") == "DECK" else []
+    if level == "lead":
+        c["slots"], c["flags"] = [(n, t[:2]) for n, t in c["slots"]], c["flags"][:3]
+    if level == "manager":
+        first = next(((n, t[:1]) for n, t in c["slots"] if t), None)
+        c["slots"], c["chips"] = [first] if first else [], []
+        c["flags"] = [f for f in c["flags"] if f.get("loud")][:1]
+    return c
+
+
+def card_facts(c):
+    """What a reader must not lose going up: the risk, loud tree rows, named owners, loud flags."""
+    f = [c["risk"]["text"]] if c.get("risk") else []
+    f += [(label.split(" · ")[0], mark) for d, label, mark in c["tree"] if mark in LOUD]
+    for name, texts in c["slots"]:
+        for t in texts:
+            mm = re.match(r"(@?[A-Za-z][\w&/.-]*(?: [\w&/.-]+){0,2}):\s", t)
+            if mm and not t.startswith("Ask the author"):
+                f.append((mm.group(1), name))
+    return f + [fl["text"] for fl in c["flags"] if fl.get("loud")]
+
+
+def carry_text(f):
+    if isinstance(f, str):
+        return f
+    name, what = f
+    return CARRY_SAYS[what] % name if what in CARRY_SAYS else "%s acts %s" % (name, what.lower())
+
+
+def carry_up(chain):
+    seen = []
+    for i, c in enumerate(chain):
+        if i:
+            text = " ".join(render_card_term(c, width=400).split())
+            for f in seen:
+                if (f if isinstance(f, str) else f[0]) not in text:
+                    c["carried"].append(carry_text(f))
+                    text += " " + carry_text(f)
+        seen += [f for f in card_facts(c) if f not in seen]
+    return chain
+
+
+def leveled(base, level):
+    base = dict({"flags": [], "lines": [], "chips": [], "evidence": [], "relation": "", "carried": [], "risk": None}, **base)
+    level = level if level in READERS else "dev"
+    return carry_up([for_level(base, lv) for lv in READERS[:READERS.index(level) + 1]])[-1]
 
 
 def tree_nodes(m, run):
@@ -1069,7 +1227,11 @@ MARK_STYLE = {
     "risk": (V("bg-warning", "#faeeda"), V("border-warning", "#ef9f27"), V("text-warning", "#854f0b"), "", False),
     "outside": (V("bg-accent", "#e6f1fb"), V("border-accent", "#85b7eb"), V("text-accent", "#185fa5"), "3 3", False),
 }
+# The "What changed" and deck marks reuse the same meanings: amber = check this, dashed = didn't happen
+MARK_STYLE.update(done=MARK_STYLE["change"], unplanned=MARK_STYLE["risk"], keep=MARK_STYLE["risk"], collide=MARK_STYLE["risk"],
+                  missed=MARK_STYLE["maybe"], brushed=MARK_STYLE["maybe"], via=("none", LINE2, SEC, "1 3", False))
 WARN_TX = MARK_STYLE["risk"][2]
+TEXT_ROWS = ("root", "area", "group", "group-risk", "note", "more")
 
 
 def tw(s, size=12):
@@ -1102,7 +1264,9 @@ def sk_tree(c):
         if d:
             px, py = last[d - 1]
             out.append('<path d="M%d %d V%d H%d" style="fill:none;stroke:%s"/>' % (px + 8, py + 20, y + 11, x, LINE2))
-        if mark in ("root", "area", "group", "group-risk"):
+        if mark in ("note", "more"):
+            out.append(sv_text(x, y + 15, label, MUT, 12))
+        elif mark in TEXT_ROWS:
             out.append(sv_text(x, y + 15, label, WARN_TX if mark == "group-risk" else INK, 14 if d == 0 else 13, 500 if d == 0 else 400))
         else:
             out.append(sv_box(x, y, tw(label), label, mark))
@@ -1168,19 +1332,21 @@ def sk_flow(c):
 def sk_radius(c):
     rc = c.get("reach") or {}
     if not rc:  # implied by a wide change: the riskiest tile in the middle, the others around it
-        names = [g for d, g, mk in c["tree"] if mk not in ("root", "area", "group", "group-risk", "outside")]
+        names = [g for d, g, mk in c["tree"] if mk not in TEXT_ROWS + ("outside",)]
         names = [n.split(" · ")[0] for n in names]
         core = next((n.split(" · ")[0] for d, n, mk in c["tree"] if mk in ("risk", "group-risk")), names[0] if names else "Change")
-        rc = {"core": core[:10], "near": [n[:14] for n in names if n != core][:3], "people": []}
-    out = ['<circle cx="170" cy="92" r="76" style="fill:none;stroke:%s" stroke-dasharray="3 4"/>' % LINE if rc["people"] else "",
-           '<circle cx="170" cy="92" r="56" style="fill:none;stroke:%s"/>' % LINE2,
-           '<circle cx="170" cy="92" r="27" style="fill:%s;stroke:%s"/>' % MARK_STYLE["risk"][:2],
-           sv_text(170, 96, rc["core"], WARN_TX, 11, anchor="middle")]
-    for (x, y), s in zip([(170, 50), (228, 96), (112, 96)], rc["near"]):
+        rc = {"core": core[:12], "near": [n[:14] for n in names if n != core][:3], "people": []}
+    # Near labels sit in the band between the core and the ring, longest at the top where the band is widest;
+    # people sit outside the dashed ring
+    out = ['<circle cx="170" cy="118" r="104" style="fill:none;stroke:%s" stroke-dasharray="3 4"/>' % LINE if rc["people"] else "",
+           '<circle cx="170" cy="118" r="78" style="fill:none;stroke:%s"/>' % LINE2,
+           '<circle cx="170" cy="118" r="%d" style="fill:%s;stroke:%s"/>' % ((max(26, len(rc["core"]) * 3 + 8),) + MARK_STYLE["risk"][:2]),
+           sv_text(170, 122, rc["core"], WARN_TX, 11, anchor="middle")]
+    for (x, y), s in zip([(170, 70), (124, 152), (216, 152)], sorted(rc["near"], key=len, reverse=True)):
         out.append(sv_text(x, y, s, INK, 11, anchor="middle"))
-    for (x, y), s in zip([(170, 11), (282, 170), (58, 170)], rc["people"]):
+    for (x, y), s in zip([(170, 10), (292, 220), (48, 220)], rc["people"]):
         out.append(sv_text(x, y, s, SEC, 11, anchor="middle"))
-    return sv(340, 184, "".join(out), "How far it reaches")
+    return sv(340, 228, "".join(out), "How far it reaches")
 
 
 def sk_before_after(c):
@@ -1204,25 +1370,56 @@ def sk_before_after(c):
 SKETCHES = {"tree": sk_tree, "layers": sk_layers, "flow": sk_flow, "radius": sk_radius, "before_after": sk_before_after}
 
 
+PHASE_LABEL.update(IDEA="Idea", DECK="Deck")
+RISK_TAG = {"plan": "from plan", "possible": "possible"}
+
+
+def card_meta(c):
+    return "Readback · " + c["product"] + " · " + (c.get("phase_label") or PHASE_LABEL.get(c["phase"], "")) + "".join(" · " + x for x in c.get("meta", []) if x)
+
+
+def range_text(hs, n=3):
+    """[(start, len)] from the diff as 'L12–30, L41'; a pure deletion is 'deleted near L7'."""
+    out = [("deleted near L%d" % s if not k else ("L%d" % s if k == 1 else "L%d–%d" % (s, s + k - 1))) for s, k in hs[:n]]
+    return ", ".join(out) + (" +%d more" % (len(hs) - n) if len(hs) > n else "")
+
+
 def render_card_widget(c):
-    """A fragment for the host's visual tool: no page wrapper, host colours, transparent background."""
-    r = c.get("risk")
-    tag = {"plan": "from plan", "possible": "possible"}
-    risk = (('<p style="margin:0 0 10px;font-size:14px;color:%s">Risk: %s <span style="font-size:11px;padding:0 7px;border-radius:6px;background:%s">%s</span></p>'
-             % (WARN_TX, html.escape(r["text"]), MARK_STYLE["risk"][0], tag[r["source"]])) if r else
-            '<p style="margin:0 0 10px;font-size:13px;color:%s">No risk found</p>' % MUT)
-    sk = "".join('<div style="min-width:0"><p style="margin:0 0 4px;font-size:11px;color:%s">%s</p>%s</div>' % (MUT, SKETCH_LABEL[s], SKETCHES[s](c))
-                 for s in c["sketches"])
-    slots = "".join('<div style="display:grid;grid-template-columns:110px 1fr;gap:8px;font-size:13px;padding:5px 0;border-top:0.5px solid %s">'
-                    '<span style="color:%s">%s</span><span>%s</span></div>' % (LINE, SEC, name, html.escape(c["acts"][k]))
-                    for k, name in SLOTS if c["acts"].get(k))
+    """A fragment for the host's visual tool: no page wrapper, host colours, transparent background.
+    Only the deck card carries buttons (they send the choice back to chat); no card has a script."""
+    esc, r = html.escape, c.get("risk")
+    p = lambda s, size=13, color=SEC, gap=6, extra="": '<p style="margin:0 0 %dpx;font-size:%dpx;color:%s%s">%s</p>' % (gap, size, color, extra, s)
+    out = [p(esc(card_meta(c)), 12, SEC, 4)]
+    if c.get("relation"):
+        out.append(p(esc(c["relation"]), 12, MUT, 4))
+    out.append(p(esc(c["headline"]), 17, INK, 4, ";font-weight:500;line-height:1.4"))
+    if c["phase"] in ("PLAN", "IDEA"):
+        out.append(p('Risk: %s <span style="font-size:11px;padding:0 7px;border-radius:6px;background:%s">%s</span>'
+                     % (esc(r["text"]), MARK_STYLE["risk"][0], RISK_TAG[r["source"]]), 14, WARN_TX, 10) if r else p("No risk found", 13, MUT, 10))
+    if c["chips"]:
+        out.append(p("".join('<span style="display:inline-block;padding:1px 8px;margin:0 6px 0 0;border-radius:6px;border:0.5px dashed %s">%s</span>'
+                             % (MARK_STYLE["outside"][1], esc(x)) for x in c["chips"]), 12, MARK_STYLE["outside"][2], 10))
+    if c["sketches"]:
+        out.append('<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:14px;margin:0 0 10px">%s</div>'
+                   % "".join('<div style="min-width:0">%s%s</div>' % (p(SKETCH_LABEL[s], 11, MUT, 4), SKETCHES[s](c)) for s in c["sketches"]))
+    out += [p(esc(l)) for l in c["lines"]]
+    out += [p("⚠ " + esc(f["text"]) + ' <span style="color:%s">· %s</span>' % (SEC, esc(f["who"])), 13, WARN_TX if f.get("loud") else INK, 4)
+            for f in c["flags"]]
+    for name, fs in c["evidence"]:
+        out.append('<details style="margin:0 0 4px;font-size:12px;color:%s"><summary style="cursor:pointer">%s · %s</summary>%s</details>'
+                   % (SEC, esc(name), plural(len(fs), "file"), "".join(p(esc(path) + " " + esc(range_text(hs)), 12, SEC, 2, ";padding-left:14px;font-family:" + V("font-mono", "monospace"))
+                                                               for path, hs in fs)))
+    out += ['<div style="display:grid;grid-template-columns:110px 1fr;gap:8px;font-size:13px;padding:5px 0;border-top:0.5px solid %s">'
+            '<span style="color:%s">%s</span><span>%s</span></div>' % (LINE, SEC, name, "<br>".join(esc(t) for t in texts)) for name, texts in c["slots"]]
+    if c["carried"]:
+        out.append(p("Still true: " + esc(" · ".join(c["carried"])), 12, WARN_TX, 4, ";padding-top:6px"))
+    if c.get("buttons"):
+        out.append('<div style="display:flex;flex-wrap:wrap;gap:8px;margin-top:12px">%s</div>' % "".join(
+            '<button onclick="sendPrompt(%s)" style="font:inherit;font-size:13px;padding:6px 14px;border-radius:8px;border:0.5px solid %s;background:transparent;color:%s;cursor:pointer">%s</button>'
+            % (esc(json.dumps(prompt, ensure_ascii=False)), LINE2, INK, esc(label)) for label, prompt in c["buttons"]))
     return ('<div class="readback-card" style="position:relative;font-family:%s;color:%s;border:0.5px solid %s;border-radius:12px;padding:16px 18px">'
-            '<h2 style="position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);margin:0">About to change: %s</h2>'
-            '<p style="margin:0 0 4px;font-size:12px;color:%s">Readback · %s · About to change · %s · %s</p>'
-            '<p style="margin:0 0 4px;font-size:17px;font-weight:500;line-height:1.4">%s</p>%s'
-            '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:14px;margin:0 0 10px">%s</div>%s</div>'
-            % (V("font-sans", "system-ui, sans-serif"), INK, LINE, html.escape(c["headline"]), SEC, html.escape(c["product"]), c["severity"], c["kind"],
-               html.escape(c["headline"]), risk, sk, slots))
+            '<h2 style="position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);margin:0">%s: %s</h2>%s</div>'
+            % (V("font-sans", "system-ui, sans-serif"), INK, LINE, PHASE_LABEL.get(c["phase"], ""), esc(c["headline"]), "".join(out)))
 
 
 PAGE_VARS = {
@@ -1240,19 +1437,16 @@ def render_card_html(c):
            "body{margin:0;background:var(--page);font:15px/1.55 system-ui,-apple-system,Segoe UI,sans-serif}"
            "main{max-width:880px;margin:0 auto;padding:24px 16px 64px}" % (PAGE_VARS["light"], PAGE_VARS["dark"], PAGE_VARS["dark"]))
     return ('<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">'
-            "<title>Readback plan</title><style>" + css + "</style></head><body><main>" + render_card_widget(c) + "</main></body></html>")
+            "<title>Readback " + {"DONE": "changes", "DECK": "deck"}.get(c["phase"], "plan") + "</title><style>" + css +
+            "</style></head><body><main>" + render_card_widget(c) + "</main></body></html>")
 
 
-TERM_MARK = {"new": " (new)", "removed": " (removed)", "risk": "  ⚠", "group-risk": "  ⚠"}
+TERM_MARK = {"new": " (new)", "removed": " (removed)", "risk": "  ⚠", "group-risk": "  ⚠", "done": " ✓",
+             "unplanned": "  ⚠", "keep": "  ⚠", "collide": "  ⚠"}
 
 
-def render_card_term(c, width=80):
-    r = c.get("risk")
-    L = [("Readback · " + c["product"] + " · About to change · " + c["severity"] + " · " + c["kind"])[:width]]
-    L += wrap(c["headline"], width)
-    L += wrap("Risk: " + r["text"] + " (" + {"plan": "from plan", "possible": "possible"}[r["source"]] + ")", width) if r else ["No risk found"]
-    L.append("")
-    rows = c["tree"]
+def term_tree(rows, width=80):
+    L = []
     for i, (d, label, mark) in enumerate(rows):
         if d == 0:
             L.append(label)
@@ -1262,6 +1456,22 @@ def render_card_term(c, width=80):
             pre += "   " if not more_at(rows, i, lv) else "│  "
         pre += "├─ " if more_at(rows, i, d) else "└─ "
         L.append((pre + label + TERM_MARK.get(mark, ""))[:width])
+    return L
+
+
+def render_card_term(c, width=80):
+    r = c.get("risk")
+    L = [card_meta(c)[:width]]
+    if c.get("relation"):
+        L += wrap(c["relation"], width)
+    L += wrap(c["headline"], width)
+    if c["phase"] in ("PLAN", "IDEA"):
+        L += wrap("Risk: " + r["text"] + " (" + RISK_TAG[r["source"]] + ")", width) if r else ["No risk found"]
+    if c["chips"]:
+        L += wrap(" · ".join(c["chips"]), width)
+    if "tree" in c["sketches"]:
+        L.append("")
+        L += term_tree(c["tree"], width)
     lines = {
         "flow": lambda: "What happens: " + " → ".join(c["flow"]["steps"]) + " → " + " | ".join(b["text"] for b in c["flow"]["branches"]),
         "layers": lambda: "How deep: " + " · ".join(ly + " " + ", ".join(l for l, _ in bx) for ly, bx in layer_rows(c) if bx),
@@ -1270,19 +1480,313 @@ def render_card_term(c, width=80):
         "before_after": lambda: "What moves: " + " · ".join(g + " {" + ", ".join(k) + "}" for g, k in c["before_after"]["before"]) +
                                 " → " + " · ".join(g + " {" + ", ".join(k) + "}" for g, k in c["before_after"]["after"]),
     }
-    extra = [s for s in c["sketches"][1:]]
+    extra = [s for s in c["sketches"] if s != "tree"]
     if extra:
         L.append("")
         for s in extra:
             for j, line in enumerate(wrap(lines[s](), width - 2)):
                 L.append(("" if j == 0 else "  ") + line)
-    acts = [(name, c["acts"][k]) for k, name in SLOTS if c["acts"].get(k)]
-    if acts:
+    hang = lambda s, lead="", indent="  ": [(lead if j == 0 else indent) + line for j, line in enumerate(wrap(s, width - len(indent)))]
+    if c["lines"] or c["flags"]:
         L.append("")
-        for name, txt in acts:
-            for j, line in enumerate(wrap(txt, width - 18)):
-                L.append(("  " + (name if j == 0 else "").ljust(16) + line).rstrip())
+        for s in c["lines"]:
+            L += hang(s)
+        for f in c["flags"]:
+            L += hang(f["text"] + " (" + f["who"] + ")", "⚠ ")
+    if c["evidence"]:
+        L.append("")
+        for name, fs in c["evidence"]:
+            L += hang(name + ": " + "; ".join(path + " " + range_text(hs) for path, hs in fs), "  ", "    ")
+    if c["slots"]:
+        L.append("")
+        for name, texts in c["slots"]:
+            for k, txt in enumerate(texts):
+                for j, line in enumerate(wrap(txt, width - 18)):
+                    L.append(("  " + (name if j == 0 and k == 0 else "").ljust(16) + line).rstrip())
+    if c["carried"]:
+        L.append("")
+        L += hang("Still true: " + " · ".join(c["carried"]))
+    if c.get("buttons"):
+        L.append("")
+        L += hang("Choose: " + " · ".join(label for label, _ in c["buttons"]))
     return "\n".join(L)
+
+
+def render_card_md(c, link_base=None):
+    """For a PR comment: the term tree in a code block, then checks, evidence with line links, and slots."""
+    L = ["### " + card_meta(c), "", "**" + c["headline"] + "**", ""]
+    if c.get("relation"):
+        L += ["<sub>" + html.escape(c["relation"]) + "</sub>", ""]
+    if c["chips"]:
+        L += ["> " + " · ".join(c["chips"]), ""]
+    if c["tree"]:
+        L += ["```text"] + term_tree(c["tree"], 100) + ["```", ""]
+    L += [l + "  " for l in c["lines"]]
+    if c["flags"]:
+        L += ["", "**Check**"] + ["- ⚠ " + f["text"] + " · **" + f["who"] + "**" for f in c["flags"]]
+    if c["evidence"]:
+        def link(path, hs):
+            label = "`" + path + "` " + range_text(hs)
+            if not link_base:
+                return label
+            s, k = (hs or [(1, 0)])[0]
+            return "[" + label + "](" + link_base.rstrip("/") + "/" + path + ("#L%d-L%d" % (s, s + max(k, 1) - 1) if hs else "") + ")"
+        L += ["", "<details><summary>Evidence</summary>", ""]
+        L += ["- **" + name + "**: " + " · ".join(link(path, hs) for path, hs in fs) for name, fs in c["evidence"]]
+        L += ["", "</details>"]
+    for name, texts in c["slots"]:
+        L += ["", "**" + name + "**"] + ["- [ ] " + t for t in texts]
+    if c["carried"]:
+        L += ["", "<sub>Still true: " + html.escape(" · ".join(c["carried"])) + "</sub>"]
+    return "\n".join(L)
+
+
+# ---------------------------------------------------------------- "What changed" card
+# The same card after the work: each planned tile checked against the diff, with the lines that prove it.
+TEST_RE = r"(?i)((^|/)(tests?|spec|__tests__|integration_test)/|_test\.|\.test\.|\.spec\.|(^|/)test_[^/]+$)"
+SKIP_MARK_RE = r"(\.skip\(|\bxit\(|\bxdescribe\(|\.only\(|@pytest\.mark\.skip|\bt\.Skip\(|@unittest\.skip|@Disabled\b|@Ignore\b)"
+API_RE = r"(?i)(openapi|swagger|\.proto$|\.graphql$|\.gql$|(^|/)api/)"
+SCHEMA_RE = r"(?i)((^|/)migrations?/|schema|\.sql$|\.prisma$|(^|/)models?\.py$)"
+METRIC_RE = r"(?i)((^|/)(metrics?|analytics|tracking|telemetry)(/|\.[a-z]+$)|(^|/)events?\.(json|ya?ml)$)"
+DEPS_RE = (r"(?i)(^|/)(package\.json|package-lock\.json|yarn\.lock|pnpm-lock\.yaml|requirements[^/]*\.txt|pyproject\.toml|pipfile(\.lock)?|"
+           r"poetry\.lock|go\.(mod|sum)|cargo\.(toml|lock)|gemfile(\.lock)?|pubspec\.(yaml|lock)|build\.gradle(\.kts)?|pom\.xml|composer\.(json|lock))$")
+CHECKS = [(API_RE, "risk", "API file changed: %s (callers outside the repo may break)"),
+          (SCHEMA_RE, "risk", "Schema or migration changed: %s"),
+          (METRIC_RE, "metric", "Metric definition changed: %s (dashboards may shift)"),
+          (DEPS_RE, "deps", "Dependencies changed: %s (upstream not reviewed)")]
+# What a PR body or plan says, and what in the diff would make it untrue
+CLAIMS = [("money", r"\bno (money|pricing|price|payments?|billing|revenue) (impact|changes?)\b|\b(does|do)(n't| not) (touch|affect|change) (money|pricing|prices|payments?|billing)\b"),
+          ("ui", r"\bno (user[- ]facing|ui|visual|visible|behaviou?r(al)?|functional) changes?\b|\b(backend|internal)[- ]only\b"),
+          ("only", r"\bonly (touches|changes|affects|modifies) ([^.;\n]+)"),
+          ("tests", r"\b(adds?|added|adding|includes?|with|new) (unit |integration |e2e |regression )?tests?\b|\btests? (added|included)\b"),
+          ("schema", r"\bno (schema|database|db|migrations?)( changes?)?\b"),
+          ("compat", r"\bbackwards?[- ]compatible\b|\bno breaking changes?\b|\bnon[- ]breaking\b")]
+DONE_SAYS = {"done": "changed", "unplanned": "not in the plan", "missed": "not touched", "brushed": "barely touched",
+             "quiet": "code only", "keep": "plan said leave alone"}
+DONE_MARK = {"done": "done", "unplanned": "unplanned", "missed": "missed", "brushed": "brushed", "quiet": "brushed", "keep": "keep", "via": "via"}
+
+
+def route(m, why, owner=""):
+    """Who acts on a flag: money and plan questions go to the role that owns them, anything about the
+    code goes to the tile's owner first. Roles say what they act on in the map ("acts_on")."""
+    role = next((r for r, v in (m.get("roles") or {}).items() if why in (v.get("acts_on") or [])), None)
+    default = {"money": "finance", "unplanned": "pm", "metric": "pm"}.get(why, "engineer")
+    return (role or default) if why in ("money", "unplanned", "metric") else (owner or role or default)
+
+
+def git_diff(rng, args):
+    """git diff for a range, one commit (its own parent, or the first commit) or the branch work."""
+    if rng:
+        if ".." not in rng and not rng.startswith("#") and not git(["rev-parse", "--verify", "--quiet", rng + "^"]).strip():
+            return git(["show", "--format="] + args + [rng])
+        if ".." not in rng and not rng.startswith("#"):
+            rng = rng + "^.." + rng
+        return git(["diff"] + args + [rng])
+    return git(["diff"] + args + [base_ref()])
+
+
+def diff_detail(rng=None):
+    """Changed line ranges per file, A/M/D per file, and skip/only markers added to tests."""
+    hunks, status, flips, cur = {}, {}, 0, None
+    for line in git_diff(rng, ["-U0", "-M", "--no-color"]).splitlines():
+        if line.startswith("diff --git "):
+            mm = re.match(r"diff --git a/.* b/(.*)$", line)
+            cur = mm.group(1) if mm else None
+            if cur:
+                hunks.setdefault(cur, [])
+        elif line.startswith("@@") and cur:
+            mm = re.match(r"@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@", line)
+            if mm:
+                hunks[cur].append((int(mm.group(1)), int(mm.group(2)) if mm.group(2) is not None else 1))
+        elif line.startswith("+") and not line.startswith("+++") and cur and re.search(TEST_RE, cur) and re.search(SKIP_MARK_RE, line):
+            flips += 1
+    for line in git_diff(rng, ["--name-status", "-M"]).splitlines():
+        parts = line.split("\t")
+        if len(parts) >= 2:
+            status[parts[-1]] = parts[0][:1]
+    if not rng:
+        for p in git(["ls-files", "--others", "--exclude-standard"]).splitlines():
+            if not p.startswith(".readback/"):
+                status[p], hunks[p] = "A", [(1, new_lines(p))]
+    return {"hunks": hunks, "status": {p: s for p, s in status.items() if not p.startswith(".readback/")}, "flips": flips}
+
+
+def test_line(detail):
+    st = [s for p, s in detail["status"].items() if re.search(TEST_RE, p)]
+    a, r = st.count("A"), st.count("D")
+    parts = [", ".join(w % n for n, w in ((a, "%d added"), (len(st) - a - r, "%d changed"), (r, "%d removed")) if n)]
+    if detail["flips"]:
+        parts.append(plural(detail["flips"], "skip/only marker") + " added")
+    return "Test files: " + " · ".join(p for p in parts if p) if st or detail["flips"] else ""
+
+
+def short_paths(ps, n=2):
+    return ", ".join(os.path.basename(p) for p in ps[:n]) + (" +%d" % (len(ps) - n) if len(ps) > n else "")
+
+
+def importers(m, p):
+    """Feature tiles whose code names this file's stem (an app bar every screen draws)."""
+    stem = os.path.splitext(os.path.basename(p))[0]
+    if len(stem) < 5:
+        return []
+    ids = {t["id"] for q in git(["grep", "-l", "-F", stem]).splitlines() if q != p and re.search(CODE_RE, q)
+           for t in [tile_of(m, "features", q)] if t}
+    return sorted(ids)
+
+
+def checks(m, b, files, detail, run):
+    """Things a reviewer should look at, shown only when they fire."""
+    out, feats = [], {t["id"]: t for t in m["levels"]["features"]["tiles"]}
+    paths = [p for p in (detail["status"] or files) if not re.search(TEST_RE, p)]
+    for p in [p for p in b["unmapped"] if shared_rule(m, p)[0]][:2]:
+        users = [feats[i]["name"] for i in shared_users(m, p)]
+        out.append({"text": "Shared file changed: %s%s" % (os.path.basename(p), " (used by " + ", ".join(users[:3]) + ("…" if len(users) > 3 else "") + ")" if users else ""),
+                    "who": route(m, "risk")})
+    for p in [p for p in paths if re.search(UI_RE, p) and re.search(CODE_RE, p)][:5]:
+        t = tile_of(m, "features", p)
+        users = [i for i in importers(m, p) if t and i != t["id"]] if t and p not in t["owns"] else []
+        if len(users) >= 2:
+            out.append({"text": "%s is drawn by %d other features (%s)" % (os.path.basename(p), len(users), ", ".join(feats[i]["name"] for i in users[:3])),
+                        "who": route(m, "risk", t.get("owner", ""))})
+    for rx, why, say in CHECKS:
+        hit = [p for p in paths if re.search(rx, p)]
+        if hit:
+            t = tile_of(m, "features", hit[0])
+            out.append({"text": say % short_paths(hit), "who": route(m, why, (t or {}).get("owner", ""))})
+    card, text = run.get("card"), (run.get("text") or "")
+    if (card and not card.get("items")) or (run.get("source") == "pr" and len(re.sub(r"(?im)^\s*Readback-Plan:.*$", "", text).split()) < 15):
+        out.append({"text": "Thin plan: ask the author what done looks like", "who": route(m, "unplanned")})
+    return out
+
+
+def quote(text, mm, n=12):
+    end = min([i for i in (text.find(c, mm.end()) for c in ".,;\n!?") if i >= 0] + [len(text)])
+    return " ".join(text[mm.start():end].split()[:n]).rstrip(",:")
+
+
+def claims(m, text, b, detail):
+    """Claims in the PR body or plan that the diff does not back up, with the file that says otherwise."""
+    text = re.sub(r"(?im)^\s*Readback-Plan:.*$", "", text or "")
+    if not text.strip():
+        return []
+    real = [t for t in b["tiles"] if t["touched"] and not t["brushed"] and not t["sweep"] and not t.get("quiet")]
+    paths = list(detail["status"])
+    out = []
+    for kind, rx in CLAIMS:
+        mm = re.search("(?i)" + rx, text)
+        if not mm:
+            continue
+        said, ev, who, loud = 'Says "%s"' % quote(text, mm), None, None, True
+        if kind == "money":
+            hit = [t for t in real if t["money"]]
+            ev, who = hit and ("but %s changed (%s)" % (hit[0]["name"], hit[0]["paths"][0])), route(m, "money")
+        elif kind == "ui":
+            hit = [t for t in real if t.get("audience", "customer") == "customer"]
+            ev, who = hit and ("but %s changed for customers (%s)" % (hit[0]["name"], hit[0]["paths"][0])), route(m, "unplanned")
+        elif kind == "only":
+            named = {t["id"] for lv in LEVELS for t in m["levels"][lv]["tiles"] if t["name"].lower() in mm.group(2).lower()}
+            hit = [t for t in real if t["id"] not in named] if named else []
+            ev, who = hit and ("but %s changed too (%s)" % (hit[0]["name"], hit[0]["paths"][0])), route(m, "unplanned")
+        elif kind == "tests":
+            ev, who = (not any(re.search(TEST_RE, p) for p in paths)) and "but no test file changed", route(m, "tests")
+        elif kind == "schema":
+            hit = [p for p in paths if re.search(SCHEMA_RE, p) and not re.search(TEST_RE, p)]
+            ev, who = hit and ("but %s changed" % hit[0]), route(m, "risk")
+        elif kind == "compat":
+            hit = [p for p in paths if (re.search(API_RE, p) or re.search(SCHEMA_RE, p)) and not re.search(TEST_RE, p)]
+            ev, who, loud = hit and ("check it: %s changed" % short_paths(hit)), route(m, "risk"), False
+        if ev:
+            out.append({"text": said + ", " + ev, "who": who, "loud": loud})
+    return out
+
+
+def and_list(names, n=3):
+    names = names[:n] + (["%d more" % (len(names) - n)] if len(names) > n else [])
+    return names[0] if len(names) == 1 else ", ".join(names[:-1]) + " and " + names[-1]
+
+
+def done_card_model(m, run, b, detail, level="dev", text=None, ctx=None):
+    """b is the DONE board (features, change lens); run may carry the plan card it is checked against."""
+    pc, feats = run.get("card") or {}, {t["id"]: t for t in m["levels"]["features"]["tiles"]}
+    what = {}
+    for it in pc.get("items", []):
+        if it["tile"]:
+            what.setdefault(it["tile"], it["what"])
+    keep, areas, seen = set(pc.get("keep", [])), {}, {}
+    for t in b["tiles"]:
+        via = t.get("via_shared") and not (t["touched"] and not t["brushed"])
+        if t["unplanned"]:
+            st = "unplanned"
+        elif t["missed"]:
+            st = "brushed" if t["touched"] else "missed"
+        elif via:
+            st = "via"
+        elif t.get("quiet"):
+            st = "quiet"
+        elif t["touched"] and not t["brushed"] and not t["sweep"]:
+            st = "done"
+        else:
+            continue
+        if st in ("done", "unplanned") and t["id"] in keep:
+            st = "keep"
+        say = what.get(t["id"]) if st == "done" and what.get(t["id"]) else ("via " + os.path.basename(t["via_shared"][0]) if st == "via" else DONE_SAYS[st])
+        label = t["name"] + " · " + say + (" · %s, %s" % (plural(t["files"], "file"), plural(t["lines"], "line")) if t["touched"] and st != "brushed" else "")
+        areas.setdefault(feats[t["id"]].get("area", ""), []).append((label, st, t))
+        seen[t["id"]] = st
+    for it in pc.get("items", []):
+        if not it["tile"]:
+            areas.setdefault(it.get("area", ""), []).append((it["name"] + " · new, not on the map yet", "brushed", None))
+    rows = [(0, b["product"] or "Product", "root")]
+    for area, rs in areas.items():
+        d = 1
+        if area:
+            rows.append((1, area, "area"))
+            d = 2
+        for label, st, t in rs:
+            rows.append((d, label, DONE_MARK[st]))
+            purpose = t and ((ctx or {}).get(t["id"]) or {}).get("purpose")
+            if purpose and st in ("done", "via", "keep", "unplanned"):
+                rows.append((d + 1, "↳ " + purpose, "note"))
+    if len(rows) == 1:
+        rows.append((1, "Nothing at the feature level", "note"))
+
+    names = lambda *sts: [feats[i]["name"] for i, s in seen.items() if s in sts]
+    planned = bool(plan_expected(run).get("features"))
+    off = names("unplanned", "missed", "brushed", "keep")
+    if b["kind"] != "product":
+        headline, status = re.sub(r"\s*[" + DISC + "]", "", b["sentence"]).split(". ")[0].rstrip(".") + ".", "no product change"
+    elif not seen:
+        headline, status = "Nothing at the feature level changed", "no plan" if not planned else "off plan"
+    elif planned and pc and not off:
+        headline, status = "Done as planned: " + pc["headline"], "as planned"
+    else:
+        parts = [("Changed " + and_list(names("done", "via", "quiet"))) if names("done", "via", "quiet") else "",
+                 ("not in the plan: " + and_list(names("unplanned"))) if names("unplanned") else "",
+                 ("not touched: " + and_list(names("missed", "brushed"))) if names("missed", "brushed") else "",
+                 ("plan said leave alone: " + and_list(names("keep"))) if names("keep") else ""]
+        headline = "; ".join(p for p in parts if p)
+        headline, status = headline[:1].upper() + headline[1:], ("off plan" if planned else "no plan")
+
+    flags = [{"text": "Plan said leave %s alone, but it changed" % feats[i]["name"], "who": route(m, "risk", feats[i].get("owner", "")), "loud": True}
+             for i, s in seen.items() if s == "keep"]
+    flags += claims(m, text, b, detail) + checks(m, b, list(detail["status"]), detail, run)
+    slot = {"merge": [pc["acts"]["merge"]] if pc.get("acts", {}).get("merge") else [],
+            "release": [pc["acts"]["release"]] if pc.get("acts", {}).get("release") else []}
+    for a in b["acts"]:
+        who = a["who"].upper() if len(a["who"]) <= 2 else a["who"][:1].upper() + a["who"][1:]  # pm → PM
+        slot["release" if a["why"] == "money" else "merge"].append(who + ": " + a["do"])
+    evidence = []
+    for area, rs in areas.items():
+        for label, st, t in rs:
+            ps = (t or {}).get("paths") or ((t or {}).get("via_shared") or [])
+            if ps and st != "missed":
+                evidence.append((t["name"], [(p, detail["hunks"].get(p, [])) for p in ps]))
+    lines = [test_line(detail)] + (["Also changed: " + plural(len(b["unmapped"]), "file") + " no single feature owns"] if b["unmapped"] else [])
+    base = {"phase": "DONE", "product": b["product"] or "Product", "headline": clip(headline, 140, "headline", []), "meta": [status],
+            "tree": rows, "sketches": ["tree"], "keys": list(seen), "flags": flags, "lines": [l for l in lines if l],
+            "chips": ["Needs outside step: " + o["name"] for o in pc.get("outside", [])], "evidence": evidence,
+            "slots": [(name, slot[k]) for k, name in SLOTS if slot.get(k)]}
+    return leveled(base, level)
 
 
 def more_at(rows, i, depth):
@@ -1421,8 +1925,7 @@ def pct(a, n):
     return "%d of %d (%d%%)" % (a, n, round(100 * a / n)) if n else "none yet"
 
 
-def cmd_stats(argv):
-    root = repo_root()
+def read_log(root):
     evs = []
     if os.path.exists(log_path(root)):
         with open(log_path(root), encoding="utf-8") as f:
@@ -1431,7 +1934,13 @@ def cmd_stats(argv):
                     evs.append(json.loads(line))
                 except ValueError:
                     pass
-    plans = {e["plan"]: e for e in evs if e.get("ev") == "plan"}
+    return evs
+
+
+def cmd_stats(argv):
+    root = repo_root()
+    evs = read_log(root)
+    plans ={e["plan"]: e for e in evs if e.get("ev") == "plan"}
     confirms = {e["plan"]: e for e in evs if e.get("ev") == "confirm"}
     dones = {e["plan"]: e for e in evs if e.get("ev") == "done"}  # last board per plan wins
     asked = [p for p, e in plans.items() if e["maybe"] or e["couples"]]
@@ -1466,8 +1975,577 @@ def cmd_stats(argv):
           "  Planned tiles that changed     " + pct(o["planned_changed"], o["planned"]) + "   gate: 90%+",
           "  Changed tiles that were ringed " + pct(o["changed_ringed"], o["changed"]),
           "  Maybe tiles that changed       " + pct(o["maybe_changed"], o["maybe_total"]),
-          "  Boards that matched the plan   " + pct(o["exact"], o["done"]),
-          "", "   log: .readback/log.jsonl (local, gitignored)"]
+          "  Boards that matched the plan   " + pct(o["exact"], o["done"])]
+    gs = [e for e in evs if e.get("ev") == "gaps" and e.get("sessions")]
+    if gs:
+        L += ["", "Context gaps (rb gaps)",
+              "  Questions per session          " + " → ".join("%.1f" % (e["questions"] / e["sessions"]) for e in gs[-5:]) + "   goal: going down"]
+    L += ["", "   log: .readback/log.jsonl (local, gitignored)"]
+    print("\n".join(L))
+
+
+# ---------------------------------------------------------------- deck (many ideas, one card each)
+# Ideas become plan cards. Set math on their tiles, not a model, finds duplicates and overlaps; the user
+# decides one card at a time in chat, and every Build lands on one summary tree.
+DECK_CHOICES = ("build", "later", "drop", "merge")
+STOP_WORDS = {"the", "and", "for", "with", "from", "into", "when", "that", "this", "adds", "add", "new", "change", "changes",
+              "make", "makes", "more", "less", "per", "all", "its", "their", "our", "your", "can", "will", "not", "now", "use", "uses"}
+
+
+def readback_ignore(root, name):
+    """Keep a local-only file out of git (.readback/.gitignore)."""
+    gi = os.path.join(root, ".readback", ".gitignore")
+    old = open(gi, encoding="utf-8").read() if os.path.exists(gi) else ""
+    if name not in old.split():
+        os.makedirs(os.path.dirname(gi), exist_ok=True)
+        with open(gi, "a", encoding="utf-8") as f:
+            f.write(("\n" if old and not old.endswith("\n") else "") + name + "\n")
+
+
+def deck_path(root):
+    return os.path.join(root, ".readback", "deck.json")
+
+
+def load_deck(root):
+    if os.path.exists(deck_path(root)):
+        with open(deck_path(root), encoding="utf-8") as f:
+            return json.load(f)
+    return {"ideas": [], "order": []}
+
+
+def save_deck(root, deck):
+    readback_ignore(root, "deck.json")
+    with open(deck_path(root), "w", encoding="utf-8") as f:
+        json.dump(deck, f, indent=1, ensure_ascii=False)
+
+
+def idea_tiles(m, card, extra=()):
+    by, out = map_tiles_by_key(m), []
+    ids = [i["tile"] for i in card["items"] if i["tile"]] + ([card["risk"]["tile"]] if (card.get("risk") or {}).get("tile") else [])
+    ids += [by[str(x).lower()]["id"] for x in extra if str(x).lower() in by]
+    for i in ids:
+        if i not in out:
+            out.append(i)
+    return out
+
+
+def idea_area(m, idea):
+    feats = {t["id"]: t for t in m["levels"]["features"]["tiles"]}
+    return next((feats[t].get("area", "") for t in idea["tiles"] if t in feats), "") or \
+        next((i.get("area", "") for i in idea["card"]["items"] if not i["tile"]), "")
+
+
+def idea_words(idea):
+    c = idea["card"]
+    text = " ".join([idea["title"], c["headline"]] + [i["what"] for i in c["items"]])
+    return set(re.findall(r"[a-z]{3,}", text.lower())) - STOP_WORDS
+
+
+def deck_prep(m, deck):
+    feats = {t["id"] for t in m["levels"]["features"]["tiles"]}
+    areas = {t.get("area", "") for t in m["levels"]["features"]["tiles"]} - {""}
+    ideas = deck["ideas"]
+    for i in ideas:
+        i["similar"], i["overlaps"] = [], []
+        i["vague"] = not i["tiles"] and not any(it.get("area") in areas for it in i["card"]["items"] if not it["tile"])
+    for x, a in enumerate(ideas):
+        for b in ideas[x + 1:]:
+            ta, tb = set(a["tiles"]) & feats, set(b["tiles"]) & feats
+            wa, wb = idea_words(a), idea_words(b)
+            j = len(wa & wb) / len(wa | wb) if wa | wb else 0
+            if (ta and ta == tb and j >= 0.3) or j >= 0.6:
+                a["similar"].append(b["id"]), b["similar"].append(a["id"])
+            elif ta & tb:
+                a["overlaps"].append(b["id"]), b["overlaps"].append(a["id"])
+    # by area, so cards in a row share context; the ones that land nowhere go last
+    deck["order"] = [i["id"] for i in sorted(ideas, key=lambda i: (i["vague"], idea_area(m, i).lower(), i["id"]))]
+    return deck
+
+
+def idea_relation(idea):
+    r = []
+    if idea.get("similar"):
+        r.append("Similar to " + ", ".join(str(x) for x in idea["similar"][:3]) + ": merge?")
+    if idea.get("overlaps"):
+        r.append("Overlaps idea " + ", ".join(str(x) for x in idea["overlaps"][:4]))
+    if idea.get("planned_on"):
+        r.append("Planned on branch " + idea["planned_on"])
+    return " · ".join(r)
+
+
+def idea_card(m, deck, idea, level="dev"):
+    run = {"card": idea["card"], "expected": expected_from_tiles(m, idea["tiles"]), "maybe": {}}
+    c = card_model(m, run, level)
+    into = (idea.get("similar") or [None])[0]
+    say = "Readback deck: idea %d → " % idea["id"]
+    c.update(phase="IDEA", phase_label="Idea %d of %d" % (idea["id"], len(deck["ideas"])), meta=[idea_area(m, idea), c["severity"]],
+             relation=idea_relation(idea),
+             buttons=[("1 Build", say + "build"), ("2 Later", say + "later"), ("3 Drop", say + "drop"),
+                      ("4 Merge" + (" into %d" % into if into else ""), say + "merge" + (" into %d" % into if into else ""))])
+    return c
+
+
+def next_idea(deck):
+    by = {i["id"]: i for i in deck["ideas"]}
+    return next((by[i] for i in deck["order"] if i in by and not by[i].get("decision") and not by[i].get("vague")), None)
+
+
+def deck_summary(m, deck, level="dev"):
+    feats = {t["id"]: t for t in m["levels"]["features"]["tiles"]}
+    by = {i["id"]: i for i in deck["ideas"]}
+    builds = [i for i in deck["ideas"] if i.get("decision") == "build"]
+    keys = {i["id"]: [t for t in i["tiles"] if t in feats] + ["new:" + it["name"] for it in i["card"]["items"] if not it["tile"]] for i in builds}
+    for i in deck["ideas"]:  # a merged idea's tiles join the idea it went into
+        if i.get("decision") == "merge" and i.get("into") in keys:
+            keys[i["into"]] += [t for t in i["tiles"] if t in feats and t not in keys[i["into"]]]
+    who = {}
+    for iid, ks in keys.items():
+        for k in ks:
+            who.setdefault(k, []).append(iid)
+    area_of = lambda k: feats[k].get("area", "") if k in feats else next((it.get("area", "") for i in builds for it in i["card"]["items"]
+                                                                            if not it["tile"] and "new:" + it["name"] == k), "")
+    areas = {}
+    for k in who:
+        areas.setdefault(area_of(k), []).append(k)
+    rows = [(0, m.get("product", "") or "Product", "root")]
+    for area, ks in areas.items():
+        d = 1
+        if area:
+            rows.append((1, area, "area"))
+            d = 2
+        for k in ks:
+            name = feats[k]["name"] if k in feats else k[4:] + " (new)"
+            rows.append((d, name + " · idea " + ", ".join(str(x) for x in who[k]), "collide" if len(who[k]) > 1 else "change"))
+    # ideas that share a tile must go one after the other; the rest can run at the same time
+    group = {i: i for i in keys}
+    find = lambda i: i if group[i] == i else find(group[i])
+    for ids in who.values():
+        for x in ids[1:]:
+            group[find(x)] = find(ids[0])
+    groups = {}
+    for i in keys:
+        groups.setdefault(find(i), []).append(i)
+    count = lambda d: len([i for i in deck["ideas"] if i.get("decision") == d])
+    lines = []
+    if len(groups) > 1:
+        lines.append("Can be built in parallel: " + " | ".join(" + ".join("%d %s" % (i, by[i]["title"]) for i in g) for g in groups.values()))
+    for d, say in (("later", "Later"), ("merge", "Merged")):
+        ids = [i for i in deck["ideas"] if i.get("decision") == d]
+        if ids:
+            lines.append(say + ": " + ", ".join("%d %s" % (i["id"], i["title"]) + (" → %d" % i["into"] if d == "merge" and i.get("into") else "") for i in ids[:6]))
+    vague = [i for i in deck["ideas"] if i.get("vague")]
+    if vague:
+        lines.append("Too vague to place: " + ", ".join("%d %s" % (i["id"], i["title"]) for i in vague[:6]))
+    left = [i for i in deck["ideas"] if not i.get("decision") and not i.get("vague")]
+    flags = [{"text": "Ideas %s %s change %s: build them one after the other" % (and_list([str(x) for x in ids], 4), "both" if len(ids) == 2 else "all",
+                                                                              feats[k]["name"] if k in feats else k[4:]),
+              "who": route(m, "unplanned")} for k, ids in who.items() if len(ids) > 1]
+    headline = ("%s to build, in %s" % (plural(len(builds), "idea"), plural(len(groups), "independent group")) if builds else "No idea marked Build yet")
+    base = {"phase": "DECK", "phase_label": "Deck summary", "product": m.get("product", "") or "Product", "headline": headline,
+            "meta": [plural(len(deck["ideas"]), "idea")],
+            "tree": rows if builds else [], "sketches": ["tree"] if builds else [], "keys": list(who), "flags": flags,
+            "lines": ["Decided: " + " · ".join(n for n in ("%d build" % len(builds), "%d later" % count("later"), "%d drop" % count("drop"),
+                                                          "%d merged" % count("merge"), "%d undecided" % len(left)) if not n.startswith("0 "))] + lines,
+            "slots": [("Next", ["Pick one to start: deck plan ID"])] if builds else []}
+    return leveled(base, level)
+
+
+def print_card(c, fmt, out=None):
+    if fmt == "json":
+        print(json.dumps(c, indent=1, ensure_ascii=False))
+    elif fmt == "html":
+        write_out(render_card_html(c), out)
+    else:
+        print(render_card_widget(c) if fmt == "widget" else render_card_term(c))
+
+
+def print_next(root, m, deck, fmt, level):
+    idea = next_idea(deck)
+    if not idea:
+        print("Deck done: %s decided. Next: %s deck summary" % (plural(len([i for i in deck["ideas"] if i.get("decision")]), "idea"), rb_cmd()))
+        return
+    print_card(idea_card(m, deck, idea, level), fmt)
+    sys.stderr.write("Readback: record the user's answer with " + rb_cmd() + " deck decide %d build|later|drop|merge [--into ID]"
+                     " (it prints the next card).\n" % idea["id"])
+
+
+def cmd_deck(argv):
+    """rb.py deck add [FILE|-]        idea cards as JSON (one object or a list; each may add "title", "source", "tiles")
+       rb.py deck prep                find duplicates, overlaps and ideas too vague to place
+       rb.py deck next                the next undecided idea as a card (--format term|widget|json, --for L)
+       rb.py deck decide ID build|later|drop|merge [--into ID]   record the answer, print the next card
+       rb.py deck summary             every Build idea on one tree: collisions and what can run in parallel
+       rb.py deck plan ID             make a Build idea the current plan"""
+    root = repo_root()
+    os.chdir(root)
+    m = load_map(root)
+    if not m:
+        print("No map yet in %s. Run /readback init first (or run this from the project folder)." % root)
+        return
+    sub, rest = (argv[0], argv[1:]) if argv else ("", [])
+    deck, fmt, level = load_deck(root), args_get(argv, "--format", "term"), reader_level(m, argv)
+    by = {i["id"]: i for i in deck["ideas"]}
+    if sub == "add":
+        src = rest[0] if rest and not rest[0].startswith("--") else "-"
+        try:
+            raw = json.loads(sys.stdin.read() if src == "-" else open(src, encoding="utf-8").read())
+        except (OSError, ValueError) as e:
+            print("Readback: could not read the ideas (%s)." % e)
+            return
+        nid, added, warns = max(list(by) + [0]) + 1, [], []
+        for r in raw if isinstance(raw, list) else [raw]:
+            card, warn = validate_card(m, r)
+            if not card:
+                warns += warn
+                continue
+            deck["ideas"].append({"id": nid, "title": clip(r.get("title") or card["headline"], 60, "title", warn), "source": str(r.get("source") or "")[:80],
+                                  "card": card, "tiles": idea_tiles(m, card, r.get("tiles") or []), "decision": None})
+            warns += ["idea %d: %s" % (nid, w) for w in warn]
+            added.append(nid)
+            nid += 1
+        deck_prep(m, deck)
+        save_deck(root, deck)
+        if warns:
+            sys.stderr.write("Readback deck: fix these and add again if they matter:\n" + "".join("  - " + w + "\n" for w in warns))
+        print("Added %s%s; the deck has %s. Next: %s deck prep" % (plural(len(added), "idea"), " (%d–%d)" % (added[0], added[-1]) if len(added) > 1 else
+              (" (%d)" % added[0] if added else ""), plural(len(deck["ideas"]), "idea"), rb_cmd()))
+    elif sub == "prep":
+        deck_prep(m, deck)
+        save_deck(root, deck)
+        ideas = deck["ideas"]
+        sim = {tuple(sorted([i["id"]] + i["similar"])) for i in ideas if i["similar"]}
+        print("Readback deck · %s · %d near-duplicate set(s) · %d overlap another · %d too vague to place"
+              % (plural(len(ideas), "idea"), len(sim), len([i for i in ideas if i["overlaps"]]), len([i for i in ideas if i["vague"]])))
+        for s in sorted(sim):
+            print("  similar: " + ", ".join("%d %s" % (x, by[x]["title"]) for x in s))
+        for i in [i for i in ideas if i["vague"]]:
+            print("  too vague to place: %d %s" % (i["id"], i["title"]))
+        print("Next: %s deck next (one card at a time)" % rb_cmd())
+    elif sub == "next":
+        print_next(root, m, deck, fmt, level)
+    elif sub == "decide":
+        try:
+            iid, choice = int(rest[0]), rest[1].lower()
+        except (IndexError, ValueError):
+            print("usage: rb.py deck decide ID build|later|drop|merge [--into ID]")
+            return
+        choice = {"1": "build", "2": "later", "3": "drop", "4": "merge"}.get(choice, choice)
+        if iid not in by or choice not in DECK_CHOICES:
+            print("Readback deck: no idea %d, or '%s' is not one of %s." % (iid, choice, "|".join(DECK_CHOICES)))
+            return
+        into = args_get(rest, "--into") or ((by[iid].get("similar") or [None])[0] if choice == "merge" else None)
+        if choice == "merge" and (not str(into).isdigit() or int(into) not in by or int(into) == iid):
+            print("Readback deck: merge idea %d into which idea? Add --into ID." % iid)
+            return
+        by[iid].update(decision=choice, into=int(into) if choice == "merge" else None)
+        save_deck(root, deck)
+        log_event(root, {"ev": "deck", "idea": iid, "decision": choice})
+        print_next(root, m, deck, fmt, level)
+    elif sub == "summary":
+        print_card(deck_summary(m, deck, level), fmt, args_get(argv, "--out"))
+    elif sub == "plan":
+        iid = int(rest[0]) if rest and rest[0].isdigit() else None
+        if iid not in by:
+            print("usage: rb.py deck plan ID (an idea in the deck)")
+            return
+        idea, prev = by[iid], load_run(root)
+        text = idea["title"] + ". " + idea["card"]["headline"] + ". " + "; ".join(i["what"] for i in idea["card"]["items"])
+        run = record_plan(root, m, text, "plan", idea["tiles"], [])
+        run["card"] = idea["card"]
+        note_plan(root, prev, run, [])
+        idea["planned_on"] = branch()
+        save_deck(root, deck)
+        c = card_model(m, run, level)
+        c["relation"] = also_planned(root, m, c["keys"])
+        print_card(c, fmt, args_get(argv, "--out"))
+        if fmt in ("term", "widget"):
+            run["card_shown"] = card_digest(run["card"])
+        save_run(root, run)
+    else:
+        left = len([i for i in deck["ideas"] if not i.get("decision") and not i.get("vague")])
+        print("Readback deck: %s, %d undecided.\n%s" % (plural(len(deck["ideas"]), "idea"), left, cmd_deck.__doc__.replace("rb.py", rb_cmd())))
+
+
+def also_planned(root, m, keys):
+    """Another branch's plan expects some of the same features: say so on the card."""
+    names, out = {t["id"]: t["name"] for t in m["levels"]["features"]["tiles"]}, []
+    d, cur = os.path.join(root, ".readback", "runs"), os.path.basename(run_path(root))
+    for fn in sorted(os.listdir(d)) if os.path.isdir(d) else []:
+        if not fn.endswith(".json") or fn == cur:
+            continue
+        try:
+            with open(os.path.join(d, fn), encoding="utf-8") as f:
+                r = json.load(f)
+        except (OSError, ValueError):
+            continue
+        common = [names[k] for k in keys if k in names and k in plan_expected(r).get("features", [])]
+        if common:
+            out.append(fn[:-5] + " (" + ", ".join(common[:3]) + ")")
+    return ("Also planned on branch " + "; ".join(out[:3])) if out else ""
+
+
+# ---------------------------------------------------------------- fill-me (the questions people keep asking)
+# Reads this repo's Claude Code sessions on this machine only. Nothing it reads is written anywhere:
+# the log keeps gap kinds, tile ids and counts; context.md holds what Claude writes, never a prompt.
+GAP_KINDS = ("orientation", "impact", "recall", "where", "next")
+GAP_RES = [("next", r"\b(what('s| is| are)? next|next steps?|what now|what should (i|we) do|what('s| is) left|left to do|remaining|todo|"
+                    r"what (all )?(\w+ ){0,3}(we|i) (will |would )?(have|need) to do|what to do)\b"),
+           ("recall", r"\b(why did (we|you|i)|what did (we|you|i)|did (we|you)|we (decided|agreed|chose)|last time|earlier|remind me|again|previous(ly)?)\b"),
+           ("where", r"\b(where (is|are|do|does|did|can|should)|which (file|folder|module|function|class)|find the|located|lives?)\b"),
+           ("impact", r"\b(what (will|would|could) (break|change|happen)|affects?|impact|break|safe to|side[- ]effects?|depends? on|regress)|^what if\b"),
+           ("orientation", r"\b(how (does|do|is|are)|what (is|are|does|do)|explain|walk me through|overview|architecture|understand|purpose of|how many)\b|"
+                           r"^(does|do|is|are|will|can) (this|it|that|readback|the (plugin|app|hook|card|board))\b")]
+QUESTION_RE = r"(?i)\?\s*$|^(what|why|how|where|which|who|when|is|are|does|do|did)\b"
+REQUEST_RE = r"(?i)^(can|could|would|will|please|pls)\b.*\byou\b"
+# talking the work over ("shall we start?", "agree?", "done?") is a decision, not a gap in what someone knows
+DISCUSS_RE = (r"(?i)^(and |or |so |but )?(shall|should|can|could|must) (we|i)\b|^(and |so )?how (can|should|could|would) (we|i)\b|"
+              r"\b(agree|right|think so|got it|make sense|sound good|okay|ok)\W*$|^\W*(\w+\W+){0,2}(done|good|correct|yes|no)\W*$")
+
+
+def transcripts_dir(root):
+    base = os.environ.get("CLAUDE_CONFIG_DIR") or os.path.join(os.path.expanduser("~"), ".claude")
+    return os.path.join(base, "projects", re.sub(r"[^A-Za-z0-9]", "-", os.path.abspath(root)))
+
+
+def user_text(e):
+    """The words a person typed: no tool results, reminders, pasted blocks or messages from other sessions."""
+    if e.get("type") != "user" or e.get("isMeta") or e.get("isCompactSummary") or e.get("toolUseResult") is not None:
+        return None
+    c = (e.get("message") or {}).get("content")
+    if isinstance(c, list):
+        if any(isinstance(x, dict) and x.get("type") == "tool_result" for x in c):
+            return None
+        c = " ".join(x.get("text", "") for x in c if isinstance(x, dict) and x.get("type") == "text")
+    if not isinstance(c, str):
+        return None
+    c = re.sub(r"(?s)<(system-reminder|pasted_content|command-[a-z-]+|local-command-[a-z-]+)\b[^>]*>.*?</\1>", " ", c).strip()
+    if not c or c.startswith(("[Request interrupted", "Another Claude session", "This session is being continued", "Caveat:", "<")):
+        return None
+    return c
+
+
+def gap_kind(q):
+    return next((k for k, rx in GAP_RES if re.search("(?i)" + rx, q)), "unsure")
+
+
+def tool_paths(e):
+    for x in (e.get("message") or {}).get("content") or []:
+        if isinstance(x, dict) and x.get("type") == "tool_use":
+            for k in ("file_path", "notebook_path", "path"):
+                if isinstance((x.get("input") or {}).get(k), str):
+                    yield x["input"][k]
+
+
+def path_tile(root, m, p):
+    try:
+        rel = os.path.relpath(os.path.abspath(p), root).replace(os.sep, "/")
+    except ValueError:
+        return None
+    if rel.startswith(".."):
+        return None
+    t = tile_of(m, "features", rel) or tile_of(m, "parts", rel)
+    return t["id"] if t else None
+
+
+def gap_labels_path(root):
+    return os.path.join(root, ".readback", "gaps.json")
+
+
+def gap_scan(root, m, days=30):
+    """Questions typed in this repo's sessions, each sorted by kind and pinned to the tiles Claude
+    then had to read or search to answer it (the next 8 tool paths)."""
+    labels = {}
+    if os.path.exists(gap_labels_path(root)):
+        with open(gap_labels_path(root), encoding="utf-8") as f:
+            labels = json.load(f).get("labels", {})
+    cutoff = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(time.time() - days * 86400))
+    d = transcripts_dir(root)
+    res, asked = {"sessions": 0, "questions": 0, "kinds": {}, "tiles": {}, "none": 0, "unsure": []}, set()
+    for fn in sorted(os.listdir(d)) if os.path.isdir(d) else []:
+        if not fn.endswith(".jsonl"):
+            continue
+        qs, active, prompted = [], [], False
+        with open(os.path.join(d, fn), encoding="utf-8", errors="replace") as f:
+            for line in f:
+                try:
+                    e = json.loads(line)
+                except ValueError:
+                    continue
+                if e.get("timestamp") and e["timestamp"] < cutoff:
+                    continue
+                t = user_text(e)
+                if t is not None:
+                    prompted, active = True, []
+                    for s in [s.strip() for s in re.split(r"(?<!\be\.g\.)(?<!\bi\.e\.)(?<=[.?!])\s+|\n+", t) if s.strip()][:40]:
+                        qid = "q" + hashlib.sha1(" ".join(s.lower().split()).encode()).hexdigest()[:7]
+                        s = re.sub(r"(?i)^((okay|ok|so|and|but|or|yea|yeah|yes|hmm|also|well|now)\b[\s,]*)+", "", s) or s
+                        if not re.search(QUESTION_RE, s) or re.search(DISCUSS_RE, s) or qid in asked:
+                            continue  # a resumed session repeats earlier prompts: each question counts once
+                        asked.add(qid)
+                        k = labels.get(qid) or gap_kind(s)
+                        if k == "unsure" and re.search(REQUEST_RE, s):
+                            continue  # "can you commit this?" is a request, not a gap
+                        q = {"id": qid, "kind": k, "text": s[:200], "tiles": set(), "budget": 8}
+                        qs.append(q)
+                        active.append(q)
+                elif e.get("type") == "assistant" and active:
+                    for p in tool_paths(e):
+                        tid = path_tile(root, m, p)
+                        for q in active:
+                            if q["budget"] > 0:
+                                q["budget"] -= 1
+                                if tid:
+                                    q["tiles"].add(tid)
+        res["sessions"] += 1 if prompted else 0
+        for q in qs:
+            res["questions"] += 1
+            res["kinds"][q["kind"]] = res["kinds"].get(q["kind"], 0) + 1
+            if q["kind"] == "unsure":
+                res["unsure"].append((q["id"], q["text"]))
+            for tid in q["tiles"]:
+                res["tiles"].setdefault(tid, {})[q["kind"]] = res["tiles"].get(tid, {}).get(q["kind"], 0) + 1
+            res["none"] += 0 if q["tiles"] else 1
+    return res, d
+
+
+def top_gap_tiles(res, n=6):
+    return sorted(res["tiles"], key=lambda t: (-sum(res["tiles"][t].values()), t))[:n]
+
+
+def cmd_gaps(argv):
+    """rb.py gaps [--days 30] [--format term|json]   where people had to ask, by tile and kind
+       rb.py gaps --unsure                          the questions the rules could not sort, to label
+       rb.py gaps --label ID orientation|impact|recall|where|next"""
+    root = repo_root()
+    m = load_map(root)
+    if not m:
+        print("No map yet in %s. Run /readback init first (or run this from the project folder)." % root)
+        return
+    if "--label" in argv:
+        i = argv.index("--label")
+        qid, kind = (argv[i + 1:i + 3] + ["", ""])[:2]
+        if kind not in GAP_KINDS:
+            print("usage: rb.py gaps --label ID " + "|".join(GAP_KINDS))
+            return
+        readback_ignore(root, "gaps.json")
+        data = json.load(open(gap_labels_path(root), encoding="utf-8")) if os.path.exists(gap_labels_path(root)) else {"labels": {}}
+        data["labels"][qid] = kind
+        with open(gap_labels_path(root), "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=1)
+        print("%s -> %s" % (qid, kind))
+        return
+    days = int(args_get(argv, "--days", "30"))
+    res, d = gap_scan(root, m, days)
+    if not res["sessions"]:
+        print("Readback gaps: no sessions for this repo in the last %d days (looked in %s)." % (days, d))
+        return
+    if "--unsure" in argv:
+        print("Questions the rules could not sort (shown here only; never stored):")
+        for qid, text in res["unsure"]:
+            print("  %s  %s" % (qid, text[:120]))
+        print("Label each with: " + rb_cmd() + " gaps --label ID " + "|".join(GAP_KINDS))
+        return
+    log_event(root, {"ev": "gaps", "tiles": res["tiles"], "kinds": res["kinds"], "sessions": res["sessions"], "questions": res["questions"]})
+    if args_get(argv, "--format") == "json":
+        print(json.dumps(dict(res, unsure=len(res["unsure"])), indent=1))  # counts only, never the questions
+        return
+    names = {t["id"]: t["name"] for lv in LEVELS for t in m["levels"][lv]["tiles"]}
+    L = ["Readback gaps · this repo's sessions, last %d days · %s · %s (%.1f per session)" % (
+        days, plural(res["sessions"], "session"), plural(res["questions"], "question"), res["questions"] / res["sessions"]), "─" * 78]
+    if res["tiles"]:
+        L.append("Where people had to ask (questions, then what Claude had to read to answer)")
+        for tid in top_gap_tiles(res, 10):
+            ks = res["tiles"][tid]
+            L.append("  %-22s %3d   %s" % (names.get(tid, tid)[:22], sum(ks.values()), " · ".join("%s %d" % (k, n) for k, n in sorted(ks.items(), key=lambda kv: -kv[1]))))
+    if res["none"]:
+        L.append("  %-22s %3d" % ("(no tile)", res["none"]))
+    L += ["", "By kind: " + " · ".join("%s %d" % (k, res["kinds"][k]) for k in GAP_KINDS + ("unsure",) if res["kinds"].get(k))]
+    if res["unsure"]:
+        L.append("%d could not be sorted: %s gaps --unsure to label them" % (len(res["unsure"]), rb_cmd()))
+    L.append("Next: %s brief, to write .readback/context.md for the top tiles" % rb_cmd())
+    print("\n".join(L))
+
+
+CONTEXT_TEMPLATE = """## {name} (tile: {id})
+Purpose: one line, in product words
+Flow: Step → Step → Step
+Decisions: YYYY-MM-DD what was decided, and why
+Where: entry files, config, keys and flags
+Open: what is still undecided
+"""
+
+
+def context_path(root):
+    return os.path.join(root, ".readback", "context.md")
+
+
+def load_context(root):
+    """.readback/context.md: one '## Name (tile: id)' section per tile, with Purpose/Flow/Decisions/Where/Open lines."""
+    if not os.path.exists(context_path(root)):
+        return {}
+    with open(context_path(root), encoding="utf-8") as f:
+        text = f.read()
+    out = {}
+    for sec in re.split(r"(?m)^##\s+", text)[1:]:
+        head, _, body = sec.partition("\n")
+        mm = re.search(r"\(tile:\s*([\w.-]+)\)", head)
+        fields = {}
+        for line in body.splitlines():
+            fm = re.match(r"\s*[-*]?\s*(Purpose|Flow|Decisions?|Where|Open)\s*:\s*(.+)", line, re.I)
+            if fm:
+                fields[fm.group(1).lower().rstrip("s")] = fm.group(2).strip()
+        out[mm.group(1) if mm else head.strip().lower()] = dict(fields, name=re.sub(r"\s*\(tile:.*", "", head).strip())
+    return out
+
+
+def brief_text(root, m, tiles=None, n=12):
+    """'Before you ask': the context entries for what is being worked on now, in 12 lines or fewer."""
+    ctx = load_context(root)
+    if not ctx:
+        return ""
+    if not tiles:
+        tiles = list(plan_expected(load_run(root)).get("features", []))
+        for e in reversed([e for e in read_log(root) if e.get("ev") == "done"][-3:]):
+            tiles += [t for t in e.get("touched", []) if t not in tiles]
+        tiles = [t for t in tiles if t in ctx] or list(ctx)[:4]
+    L = ["Before you ask · " + (m.get("product") or "Product") + " (from .readback/context.md)"]
+    for tid in tiles:
+        e = ctx.get(tid)
+        if not e or len(L) >= n:
+            continue
+        L.append(e["name"] + ": " + e.get("purpose", ""))
+        rest = " | ".join(k.title() + ": " + e[k] for k in ("flow", "where", "decision", "open") if e.get(k))
+        if rest:
+            L.append("  " + clip(rest, 160, "brief", []))
+    return "\n".join(L[:n])
+
+
+def cmd_brief(argv):
+    """rb.py brief                  what to write in .readback/context.md, for the most-asked tiles
+       rb.py brief --show [--tiles a,b]   the short 'Before you ask' brief"""
+    root = repo_root()
+    m = load_map(root)
+    if not m:
+        print("No map yet in %s. Run /readback init first (or run this from the project folder)." % root)
+        return
+    if "--show" in argv:
+        tl = args_get(argv, "--tiles")
+        print(brief_text(root, m, [x.strip() for x in tl.split(",")] if tl else None) or
+              "No .readback/context.md yet. Run %s brief to start one." % rb_cmd())
+        return
+    res, _ = gap_scan(root, m)
+    by = {t["id"]: t for lv in LEVELS for t in m["levels"][lv]["tiles"]}
+    top = [t for t in top_gap_tiles(res) if t in by] or [t["id"] for t in m["levels"]["features"]["tiles"][:5]]
+    have = load_context(root)
+    L = ["Readback brief: write .readback/context.md, one section per tile below (most-asked first). Use the code and what you "
+         "know of this repo; say it in your own words and never quote anyone's prompt. One line per field; drop a field you can't fill.",
+         ("context.md exists: update these sections and keep the others." if have else
+          "Start the file with: # What to know before you ask"), ""]
+    for tid in top:
+        ks = res["tiles"].get(tid, {})
+        L.append("- " + by[tid]["name"] + (" (asked: " + ", ".join("%s %d" % kv for kv in sorted(ks.items(), key=lambda kv: -kv[1])) + ")" if ks else ""))
+    L += ["", "Each section:", CONTEXT_TEMPLATE.format(name=by[top[0]]["name"], id=top[0]).rstrip(),
+          "", "Then run %s brief --show and show it to the user to review, like the map." % rb_cmd()]
     print("\n".join(L))
 
 
@@ -1500,7 +2578,7 @@ def cmd_show(argv):
     os.chdir(root)
     m = load_map(root)
     if not m:
-        print("No map yet. Run /readback init first.")
+        print("No map yet in %s. Run /readback init first (or run this from the project folder)." % root)
         return
     role = args_get(argv, "--as")
     level, lens = "features", "change"
@@ -1509,7 +2587,7 @@ def cmd_show(argv):
     level = args_get(argv, "--level", level)
     lens = args_get(argv, "--lens", lens)
     fmt = args_get(argv, "--format", "term")
-    pos = [a for i, a in enumerate(argv) if not a.startswith("--") and (i == 0 or not argv[i - 1].startswith("--"))]
+    pos = [a for i, a in enumerate(argv) if not a.startswith("--") and (i == 0 or not argv[i - 1].startswith("--") or argv[i - 1] in BOOL_FLAGS)]
     for a in list(pos):
         if a in LEVELS:
             level = a; pos.remove(a)
@@ -1534,6 +2612,17 @@ def cmd_show(argv):
         run = {"source": "plan", "text": (run or {}).get("text"), "expected": expected_from_tiles(m, exp_arg.split(","))}
     files = diff_files(rng)
     kind = change_kind(commit_log(rng), files, m)
+    if "--card" in argv:  # the "What changed" card, checked against the plan card when there is one
+        b = boards_for(m, files, run, "features", "change", kind=kind)
+        c = done_card_model(m, run, b, diff_detail(rng), reader_level(m, argv), run.get("text") if run.get("source") in ("plan", "pr") else None,
+                            load_context(root))
+        if fmt == "json":
+            print(json.dumps(c, indent=1, ensure_ascii=False))
+        elif fmt in ("html", "md"):
+            write_out(render_card_html(c) if fmt == "html" else render_card_md(c, args_get(argv, "--link-base")), args_get(argv, "--out"))
+        else:
+            print(render_card_widget(c) if fmt == "widget" else render_card_term(c))
+        return
     b = boards_for(m, files, run, level, lens, kind=kind)
     if fmt == "json":
         print(json.dumps(b, indent=1))
@@ -1550,6 +2639,9 @@ def cmd_show(argv):
         print(json.dumps(render_slack(b, args_get(argv, "--link", "")), indent=1))
     else:
         print(render_term(b))
+
+
+BOOL_FLAGS = {"--card", "--show", "--unsure", "--force"}
 
 
 def cmd_init(argv):
@@ -1734,7 +2826,7 @@ def cmd_plan(argv):
     os.chdir(root)
     m = load_map(root)
     if not m:
-        print("No map yet. Run /readback init first.")
+        print("No map yet in %s. Run /readback init first (or run this from the project folder)." % root)
         return
     src = args_get(argv, "--source", "plan")
     if src not in REAL_PLANS:
@@ -1775,7 +2867,8 @@ def cmd_plan(argv):
             save_run(root, run)
         fmt = args_get(argv, "--format", "term")
         if run.get("card"):
-            c = card_model(m, run)
+            c = card_model(m, run, reader_level(m, argv))
+            c["relation"] = also_planned(root, m, c["keys"])
             if fmt == "json":
                 print(json.dumps(c, indent=1, ensure_ascii=False))
             elif fmt == "html":
@@ -1801,7 +2894,9 @@ def cmd_plan(argv):
 
 
 def rb_cmd():
-    return "\"" + sys.executable.replace(os.sep, "/") + "\" \"" + os.path.abspath(__file__).replace(os.sep, "/") + "\""
+    """The launcher next to this file: it finds a working Python on whatever machine runs the command,
+    where the hook's own interpreter can be a venv or the Windows Store stub."""
+    return "sh \"" + os.path.join(os.path.dirname(os.path.abspath(__file__)), "rb").replace(os.sep, "/") + "\""
 
 
 CARD_SCHEMA = ('{"headline": "the change in plain words, max 90 chars, no risk or hedge word first", '
@@ -1812,7 +2907,8 @@ CARD_SCHEMA = ('{"headline": "the change in plain words, max 90 chars, no risk o
                '"flow": {"steps": ["Pay", "Bank"], "branches": [{"text": "OK: done", "mark": "change"}, {"text": "Timeout: retry", "mark": "risk"}]}, '
                '"reach": {"core": "Retry", "near": ["Orders"], "people": ["Buyers"]}, '
                '"before_after": {"before": [["Checkout", ["Cart list"]]], "after": [["Cart", ["Cart list"]]]}, '
-               '"acts": {"start": "", "merge": "who checks what", "release": ""}}')
+               '"acts": {"start": "", "merge": "who checks what", "release": ""}, '
+               '"keep": ["id of a tile the plan says must not change"]}')
 
 
 def map_request(m, source="plan"):
@@ -1824,7 +2920,7 @@ def map_request(m, source="plan"):
             "tiles you are only partly sure of in --maybe:\n" + tile_list(m) +
             "\nAlso write the 'About to change' card as JSON (leave out flow, reach, before_after or acts when they don't apply; "
             "risk source is 'plan' only when the plan itself says it): " + CARD_SCHEMA +
-            "\nThen run, with the card on stdin (a heredoc):  " + rb_cmd() + " plan --tiles id1,id2 --maybe id3" +
+            "\nThen run, from this project's folder as is (don't cd into the plugin), with the card on stdin (a heredoc):  " + rb_cmd() + " plan --tiles id1,id2 --maybe id3" +
             (" --source intent" if source == "intent" else "") + " --card -  "
             "If you have a visual tool (show_widget), then run " + rb_cmd() + " plan --show --format widget and pass its output to it "
             "unchanged; otherwise show the user the card it printed, unchanged (every line), in a code block. Never redraw or trim it. "
@@ -1925,7 +3021,22 @@ def hook_done():
     save_run(root, run)
     b = boards_for(m, files, run, "features", "change", kind=change_kind(commit_log(), files, m))
     note_done(root, run, b)
+    if run.get("card"):  # a plan card exists: show the same card checked against the diff
+        c = done_card_model(m, run, b, diff_detail(), reader_level(m, []), run.get("text") if run.get("source") in ("plan", "pr") else None,
+                            load_context(root))
+        emit(render_card_term(c) + "\n   (/readback --card for the picture)")
+        return
     emit(render_term(b))
+
+
+def hook_start():
+    """SessionStart: put the short 'Before you ask' brief in Claude's context, when context.md exists."""
+    hook_input()
+    root = repo_root()
+    m = load_map(root)
+    text = brief_text(root, m) if m else ""
+    if text:
+        print(json.dumps({"hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": text}}))
 
 
 def main(argv):
@@ -1953,6 +3064,14 @@ def main(argv):
         hook_edit()
     elif c == "hook-done":
         hook_done()
+    elif c == "hook-start":
+        hook_start()
+    elif c == "deck":
+        cmd_deck(rest)
+    elif c == "gaps":
+        cmd_gaps(rest)
+    elif c == "brief":
+        cmd_brief(rest)
     else:
         cmd_show(argv)
 

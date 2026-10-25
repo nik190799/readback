@@ -1,5 +1,5 @@
 # Copy to .github/workflows/readback.yml in a repo that has .readback/map.json.
-# Posts (and keeps updating) one Readback comment per PR; optionally pings Slack
+# Posts (and keeps updating) one Readback "What changed" card per PR; optionally pings Slack
 # only for people who must act (finance, owners, PM).
 name: Readback
 on:
@@ -19,13 +19,15 @@ jobs:
       - uses: actions/setup-python@v5
         with: { python-version: "3.11" }
       - name: Fetch Readback
-        run: curl -fsSL https://raw.githubusercontent.com/nik190799/readback/readback--v0.4.0/bin/rb.py -o /tmp/rb.py
+        run: curl -fsSL https://raw.githubusercontent.com/nik190799/readback/readback--v0.5.0/bin/rb.py -o /tmp/rb.py
       - name: Draw board
         env:
           PLAN: ${{ github.event.pull_request.body }}
           RANGE: ${{ github.event.pull_request.base.sha }}..${{ github.event.pull_request.head.sha }}
         run: |
-          printf '%s' "$PLAN" | python /tmp/rb.py show "$RANGE" --plan - --format md > board.md
+          # the "What changed" card: claims in the PR body checked against the diff, each file linked to its lines
+          printf '%s' "$PLAN" | python /tmp/rb.py show "$RANGE" --plan - --card --format md \
+            --link-base "${{ github.server_url }}/${{ github.repository }}/blob/${{ github.event.pull_request.head.sha }}" > board.md
           printf '%s' "$PLAN" | python /tmp/rb.py show "$RANGE" --plan - --format slack --link "${{ github.event.pull_request.html_url }}" > slack.json
           echo "<!-- readback -->" >> board.md
       - name: Post or update the PR comment

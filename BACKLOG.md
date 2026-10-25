@@ -6,7 +6,8 @@ branch `v0.5-plan-card`, not yet merged.
 ## 1. Draw the board visually when the app supports it
 
 **Built (0.5) for the "About to change" card:** `plan --card -` and `--format widget|html|term`, the host order
-in the skill, the Stop hook asking once, and fragment tests in `tests/test_card.py`. The "What changed" board is still text.
+in the skill, the Stop hook asking once, and fragment tests in `tests/test_card.py`. **Built (0.5) for "What changed" too:**
+`show --card --format widget|html|md|term`; the Stop hook prints its term version (no block).
 
 - **Where:** the plugin itself (`skills/readback/SKILL.md`, maybe `commands/readback.md`), not per-project rules.
 - **What:** tell Claude to render the PLAN board visually (e.g. an inline widget/visual) when the host app supports it, and fall back to the current text board otherwise.
@@ -32,6 +33,11 @@ in the skill, the Stop hook asking once, and fragment tests in `tests/test_card.
 - **Test:** a snapshot test checks that the widget output follows the fragment rules above.
 
 ## 2. `/readback fill-me`: answer the questions you keep having to ask
+
+**Built (0.5):** `rb.py gaps` (this repo only, deduped across resumed sessions, discussion and requests skipped,
+`--unsure` / `--label`), `rb.py brief` and `brief --show`, the `SessionStart` hook, "↳ purpose" rows on the done card,
+questions per session in `stats`. Tests in `tests/test_gaps.py`. On this repo's own 11 sessions: 41 questions, 19 the
+rules could not sort (mostly design talk), so the labels matter. Still open: the replay trial below.
 
 - **Where:** new `rb.py gaps` (mining) + `rb.py brief` (filling) in `bin/rb.py`, a `fill-me` line in
   `commands/readback.md`, a step in `skills/readback/SKILL.md`, optional `SessionStart` hook.
@@ -66,6 +72,10 @@ in the skill, the Stop hook asking once, and fragment tests in `tests/test_card.
 
 ## 3. Read back across layers: catch what each summary drops
 
+**Built (0.5):** evidence links (tile → files → line ranges, linked in the PR comment), unsupported-claim flags
+(money, UI, "only touches", tests, schema, compatible), `keep` tiles ("Plan said leave X alone"), and approver routing
+from tile owners and role `acts_on`. Tests in `tests/test_done.py`.
+
 - **Source:** an idea from the Backroom ideation session (2026-10-22). It is a reasoned framework, not research.
 - **Idea:** work moves between layers. Dev (task, HOW) → lead (PR, WHAT/WHETHER) → manager (delivery,
   HOW MUCH/WHEN) → director (portfolio, WHY). Facts go up as summaries (diff → PR → status →
@@ -85,6 +95,9 @@ in the skill, the Stop hook asking once, and fragment tests in `tests/test_card.
   *recall* / *next* are intent coming down, so fill-me measures where the handoffs leak in your own sessions.
 
 ## 4. Reader levels: dev, senior, lead, manager
+
+**Built (0.5)** on both cards (`--for`, role `"for"` defaults, budgets with "+N more", carry-up checked for every
+fixture in `tests/test_levels.py`). The old boards without a card don't take `--for` yet. The 5-second test is still to do.
 
 - **What:** one board, squeezed harder for each step up. Same diff, same analysis; only the drawing changes.
 
@@ -113,8 +126,8 @@ in the skill, the Stop hook asking once, and fragment tests in `tests/test_card.
 - **Results:** the one-sentence headline works (87-98% at every level). v1 plan boards fail on "what do I do"
   (21-35%) and "what's risky" (26-31%); leads were confidently wrong on 34/62. v2 fixes raise both to ~80% but
   "grasped in 5 s" drops 96% → 78% (intern 95% → 56%).
-- **Adopt for the next design (v3, the two-line glance):** 1, 2, 6 (slots only when they have content) and 8 are
-  **built (0.5)** in the plan card; the rest wait for the v3 "What changed" card.
+- **Adopt for the next design (v3, the two-line glance):** **built (0.5)** on both cards, except the dependency scope
+  (dev-only / goes to users / core) in 5 and "release notes read?" in 7.
   1. Line 1 is always the change in plain words; line 2 is one risk naming its subject, tagged "from plan" or "possible".
   2. Three fixed action slots: before start / before merge / before release ("nothing" when empty).
   3. Carry-up: a medium+ risk or a named owner at any level must appear on every level above (render check).
@@ -150,17 +163,6 @@ in the skill, the Stop hook asking once, and fragment tests in `tests/test_card.
 
 ## Release order
 
-How the four items fit one pipeline: `diff + map + plan → board JSON → renderer → host`.
-
-1. **0.5 - board JSON v2** (base for everything): add `for` level, row budgets, and an `evidence` link
-   per row (tile → files → hunks, from item 3). `--format json` already exists; extend it.
-2. **0.5 - visual renderer** (item 1): `--format widget` prints a self-contained HTML fragment (no
-   doctype, host CSS variables, light/dark) built from `svg_board`, with all four levels inside and a
-   level toggle. Deterministic: `rb.py` draws it, Claude never hand-writes a board.
-   - Skill + hook text: "if a visual tool is available, pass the `--format widget` output to it
-     unchanged; otherwise paste the term board." Same "never trim a board" rule as today.
-   - `--format html` reuses the same fragment for `.readback/board.html` and PR artifacts.
-3. **0.5 - reader levels** (item 4) on top of 1 and 2.
-4. **0.6 - layer checks** (item 3): evidence links clickable, "unsupported claim" flags on PR bodies.
-5. **0.7 - fill-me** (item 2): needs transcript mining and a replay trial; adds a "Before you ask" panel
-   and `↳` rows to the same widget.
+Everything above that says **Built (0.5)** ships together as 0.5.0: ideas → deck → plan card → coding → "What changed"
+card → PR comment, at four reader levels, with fill-me. Next, from what is left: the "still to prove" tests in item 5,
+the extra change categories, the fill-me replay trial, and `--for` on the old boards.

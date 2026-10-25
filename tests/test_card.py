@@ -78,6 +78,11 @@ class ValidateTest(unittest.TestCase):
         card, _ = self.check({"risk": {"text": "Rows may be dropped", "source": "plan"}})
         self.assertFalse(card["acts"].get("start"))
 
+    def test_the_question_keeps_the_whole_risk(self):
+        risk = "A timed-out charge may already have gone through, so the retry can double-charge"
+        card, _ = self.check({"risk": {"text": risk, "source": "possible"}})
+        self.assertEqual(card["acts"]["start"], "Ask the author: " + risk + "?")
+
     def test_new_tile_needs_no_map_entry(self):
         card, warn = self.check({"items": [{"new_tile": "Cart", "area": "Checkout", "what": "new screen"}]})
         self.assertEqual((card["items"][0]["name"], card["items"][0]["mark"]), ("Cart", "new"))
@@ -191,6 +196,9 @@ class CommandTest(unittest.TestCase):
         ctx = json.loads(out)["hookSpecificOutput"]["additionalContext"]
         self.assertIn("--card -", ctx)
         self.assertIn("--format widget", ctx)
+        # the launcher, not the hook's own Python (a venv or the Windows Store stub elsewhere)
+        self.assertIn('sh "' + os.path.join(ROOT, "bin", "rb").replace(os.sep, "/") + '" plan', ctx)
+        self.assertNotIn(sys.executable.replace(os.sep, "/"), ctx)
 
 
 if __name__ == "__main__":
