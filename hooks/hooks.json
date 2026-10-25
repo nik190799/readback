@@ -1,6 +1,9 @@
 {
-  "description": "Readback: record intent at the start, after plan approval or before the first edit; show the board when Claude stops with a new diff.",
+  "description": "Readback: record intent at the start, after plan approval or before the first edit; show the board or the 'What changed' card when Claude stops with a new diff; brief Claude at session start from .readback/context.md.",
   "hooks": {
+    "SessionStart": [
+      { "hooks": [ { "type": "command", "command": "sh \"${CLAUDE_PLUGIN_ROOT}/bin/rb\" hook-start", "timeout": 10 } ] }
+    ],
     "UserPromptSubmit": [
       { "hooks": [ { "type": "command", "command": "sh \"${CLAUDE_PLUGIN_ROOT}/bin/rb\" hook-prompt", "timeout": 10 } ] }
     ],

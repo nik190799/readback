@@ -1,0 +1,12 @@
+{"tiles": ["card_charge", "confirmation"], "maybe": [],
+ "expect": {"severity": "high", "sketches": ["tree", "flow", "radius"]},
+ "card": {"headline": "Retries a card payment once when the bank times out",
+  "risk": {"text": "A slow bank could charge the buyer twice", "source": "plan", "tile": "card_charge"},
+  "items": [{"tile": "card_charge", "what": "retry once on timeout", "mark": "risk", "layer": "logic"},
+            {"tile": "confirmation", "what": "waits for the retry", "mark": "change", "layer": "screen"}],
+  "outside": [{"name": "Bank", "what": "may see two charges"}],
+  "flow": {"steps": ["Pay", "Bank"],
+           "branches": [{"text": "OK: done", "mark": "change"}, {"text": "Timeout: retry once", "mark": "change"},
+                        {"text": "Both go through: charged twice", "mark": "risk"}]},
+  "reach": {"core": "Retry", "near": ["Orders", "Refunds", "Receipts"], "people": ["Buyers", "Support", "Finance"]},
+  "acts": {"merge": "Payments: idempotency key on every retry", "release": "Support: script for double-charge refunds"}}}

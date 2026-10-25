@@ -1,0 +1,23 @@
+[
+ {"title": "Local currency prices", "headline": "Shows prices in the buyer's local currency",
+  "items": [{"tile": "prices", "what": "local currency"}]},
+ {"title": "Prices in local currency", "headline": "Shows prices in local currency for buyers",
+  "items": [{"tile": "prices", "what": "local currency prices"}]},
+ {"title": "Currency picker", "headline": "Adds a currency picker to settings",
+  "items": [{"tile": "settings", "what": "currency picker"}, {"tile": "prices", "what": "reads the picked currency"}]},
+ {"title": "Payment retry", "headline": "Retries a card payment once when the bank times out",
+  "risk": {"text": "A slow bank could charge twice", "source": "plan", "tile": "card_charge"},
+  "items": [{"tile": "card_charge", "what": "retry once", "mark": "risk", "layer": "logic"}]},
+ {"title": "Login code", "headline": "Adds a texted code to login",
+  "items": [{"tile": "login", "what": "texted code", "mark": "new"}]},
+ {"title": "Sale banner", "headline": "Adds a sale countdown to the home banner",
+  "items": [{"tile": "banner", "what": "countdown"}]},
+ {"title": "Faster reports", "headline": "Exports big reports in the background",
+  "items": [{"tile": "reports", "what": "background export"}]},
+ {"title": "Make it nicer", "headline": "Polishes the whole app",
+  "items": []},
+ {"title": "Split checkout", "headline": "Splits checkout into a cart and a pay page",
+  "items": [{"tile": "checkout", "what": "pay step only"}, {"new_tile": "Cart", "area": "Checkout", "what": "new screen", "mark": "new"}]},
+ {"title": "Receipt email", "headline": "Sends a receipt email after an order",
+  "items": [{"tile": "confirmation", "what": "sends receipt"}]}
+]

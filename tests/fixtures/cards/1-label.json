@@ -1,0 +1,5 @@
+{"tiles": ["product_page"], "maybe": [],
+ "expect": {"severity": "low", "sketches": ["tree"]},
+ "card": {"headline": "Changes 'Buy now' to 'Add to cart' on product pages",
+  "risk": null,
+  "items": [{"tile": "product_page", "what": "button label", "mark": "change", "layer": "screen"}]}}
