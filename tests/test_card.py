@@ -6,8 +6,8 @@ import glob, json, os, re, shutil, subprocess, sys, tempfile, unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
-RB = os.path.join(ROOT, "bin", "rb.py")
-sys.path.insert(0, os.path.join(ROOT, "bin"))
+RB = os.path.join(ROOT, "scripts", "rb.py")
+sys.path.insert(0, os.path.join(ROOT, "scripts"))
 import rb  # noqa: E402
 
 MAP = json.load(open(os.path.join(HERE, "fixtures", "shop-map.json"), encoding="utf-8"))
@@ -197,7 +197,7 @@ class CommandTest(unittest.TestCase):
         self.assertIn("--card -", ctx)
         self.assertIn("--format widget", ctx)
         # the launcher, not the hook's own Python (a venv or the Windows Store stub elsewhere)
-        self.assertIn('sh "' + os.path.join(ROOT, "bin", "rb").replace(os.sep, "/") + '" plan', ctx)
+        self.assertIn('sh "' + os.path.join(ROOT, "scripts", "rb").replace(os.sep, "/") + '" plan', ctx)
         self.assertNotIn(sys.executable.replace(os.sep, "/"), ctx)
 
 

@@ -1,2 +1,2 @@
-bin/rb text eol=lf
+scripts/rb text eol=lf
 *.sh text eol=lf

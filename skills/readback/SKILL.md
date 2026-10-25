@@ -10,7 +10,7 @@ a solid outline means touched, fill is the answer for the chosen lens, a ring me
 (a dotted ring means "maybe", for the user to confirm),
 and ① ② ③ point at the sentence above the board.
 
-Run `sh "${CLAUDE_PLUGIN_ROOT}/bin/rb" show [range] [level] [lens] [--as role] [--format ...]`.
+Run `sh "${CLAUDE_PLUGIN_ROOT}/scripts/rb" show [range] [level] [lens] [--as role] [--format ...]`.
 
 - Pick the level and lens from the question: "what will users notice" → `features change`;
   "is this safe" → `parts risk`; "does it touch pricing" → `features money`; a named reader → `--as <role>`.

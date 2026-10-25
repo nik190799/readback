@@ -39,7 +39,7 @@ in the skill, the Stop hook asking once, and fragment tests in `tests/test_card.
 questions per session in `stats`. Tests in `tests/test_gaps.py`. On this repo's own 11 sessions: 41 questions, 19 the
 rules could not sort (mostly design talk), so the labels matter. Still open: the replay trial below.
 
-- **Where:** new `rb.py gaps` (mining) + `rb.py brief` (filling) in `bin/rb.py`, a `fill-me` line in
+- **Where:** new `rb.py gaps` (mining) + `rb.py brief` (filling) in `scripts/rb.py`, a `fill-me` line in
   `commands/readback.md`, a step in `skills/readback/SKILL.md`, optional `SessionStart` hook.
 - **Evidence:** a scan of local Claude Code transcripts (`~/.claude/projects/*/*.jsonl`, 2026-10-20)
   found ~700 of ~2,200 user prompts were questions. Many are context gaps, not new work:
