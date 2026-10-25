@@ -36,6 +36,26 @@ Needs Python 3.8+ (found as `python3`, `python` or `py`) and git. No other depen
 | You approve a plan (plan mode) | Claude maps the plan to tiles (`rb.py plan --tiles sure --maybe unsure`) and shows the "About to change" board before editing. If there are maybe tiles, or a tile that usually changes with a planned one, it asks you once and then records the final list |
 | Claude is about to make its first edit with no mapped plan (you skipped plan mode, or a headless `claude -p` run) | Holds that one edit and asks Claude which tiles the change will touch (`--source intent`), then shows the same "About to change" board and question. Once per session |
 | Claude stops and the diff changed | Shows the board once (silent if nothing new changed) |
+| Claude stops with an "About to change" card it never showed you | Asks Claude once to show it before finishing (never loops) |
+
+## The "About to change" card
+
+When Claude maps a plan it also writes a short card as JSON (`rb.py plan --tiles … --card -`): the change in
+plain words, one risk tagged *from plan* or *possible*, what happens to each touched tile, and who acts before
+start, merge or release. `rb.py` checks it against the map and draws it the same way every time; Claude never
+draws it by hand.
+
+- **Only what the plan touches is drawn**, as a pruned tree (product → area → tile → what changes). A map
+  with 100 features gives the same small card.
+- **Extra sketches by change type, more for riskier plans** (at most 3): *What happens* (a flow with its
+  branches), *How deep* (screen / logic / data / config / outside), *How far* (who it reaches), *What moves*
+  (before / after). A one-tile label change is the tree alone.
+- **Colours mean one thing each:** amber = risk, green = new, red strike-through = removed, dashed = maybe,
+  blue dashed = outside the repo.
+- **Where it shows, best first:** the Claude app's inline visual tool (`plan --show --format widget`, passed
+  through unchanged), a page link (`--format html`), `.readback/plan.html` in your IDE's preview, or the
+  text tree in the terminal.
+- A guessed risk never blocks: it becomes a question to the plan's author before work starts.
 
 ## On demand
 

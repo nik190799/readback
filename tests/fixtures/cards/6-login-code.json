@@ -1,0 +1,13 @@
+{"tiles": ["login", "settings"], "maybe": [],
+ "expect": {"severity": "high", "sketches": ["tree", "flow", "layers"]},
+ "card": {"headline": "Adds a texted code to login",
+  "risk": {"text": "Users without signal get locked out", "source": "possible", "tile": "login"},
+  "items": [{"tile": "login", "what": "code step", "mark": "risk", "layer": "screen"},
+            {"tile": "login", "what": "code check", "mark": "new", "layer": "logic"},
+            {"tile": "login", "what": "SMS key", "mark": "new", "layer": "config"},
+            {"tile": "settings", "what": "phone number", "mark": "change", "layer": "screen"},
+            {"tile": "settings", "what": "saved phone number", "mark": "new", "layer": "data"}],
+  "outside": [{"name": "SMS provider", "what": "sends the codes"}],
+  "flow": {"steps": ["Password", "Send code"],
+           "branches": [{"text": "Right code: in", "mark": "change"}, {"text": "3 wrong: locked", "mark": "change"},
+                        {"text": "No SMS: ?", "mark": "risk"}]}}}

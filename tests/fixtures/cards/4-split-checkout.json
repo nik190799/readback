@@ -1,0 +1,9 @@
+{"tiles": ["checkout"], "maybe": [],
+ "expect": {"severity": "medium", "sketches": ["tree", "before_after"]},
+ "card": {"headline": "Splits Checkout into separate Cart and Payment screens",
+  "risk": {"text": "Saved links to the old checkout page may break", "source": "possible", "tile": "checkout"},
+  "items": [{"new_tile": "Cart", "area": "Checkout", "what": "new screen", "mark": "new", "layer": "screen"},
+            {"new_tile": "Payment", "area": "Checkout", "what": "new screen", "mark": "new", "layer": "screen"},
+            {"tile": "checkout", "what": "old page", "mark": "removed", "layer": "screen"}],
+  "before_after": {"before": [["Checkout", ["Cart list", "Payment form", "Address"]]],
+                   "after": [["Cart", ["Cart list"]], ["Payment", ["Payment form", "Address"]]]}}}

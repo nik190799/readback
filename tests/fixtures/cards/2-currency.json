@@ -1,0 +1,7 @@
+{"tiles": ["settings", "prices"], "maybe": [],
+ "expect": {"severity": "medium", "sketches": ["tree", "layers"]},
+ "card": {"headline": "Lets users pick a display currency in Settings",
+  "risk": {"text": "Prices could round differently in Checkout", "source": "possible", "tile": "prices"},
+  "items": [{"tile": "settings", "what": "currency option", "mark": "change", "layer": "screen"},
+            {"tile": "settings", "what": "saved currency", "mark": "new", "layer": "data"},
+            {"tile": "prices", "what": "price format", "mark": "risk", "layer": "logic"}]}}

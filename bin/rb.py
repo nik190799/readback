@@ -7,9 +7,10 @@ One model, many surfaces. Every command reads the repo's map
   rb.py init [--force]              draft .readback/map.json from the repo tree
   rb.py show [RANGE] [--level L] [--lens X] [--as ROLE] [--format term|md|slack|html|json|trailer|line]
                                     [--expected a,b] [--plan TEXT|-]   (PR body with a Readback-Plan: line)
-  rb.py plan --tiles a,b [--maybe c] [--source plan|pr] [--format term|html|json] [--out F]
-                                    Claude's mapping of a real plan to tiles; draws the "About to change" board
-  rb.py plan --show [--format ...]  the stored "About to change" board again
+  rb.py plan --tiles a,b [--maybe c] [--source plan|pr] [--card FILE|-] [--format term|widget|html|json] [--out F]
+                                    Claude's mapping of a real plan to tiles (and its card JSON); draws the
+                                    "About to change" card, or the board when there is no card
+  rb.py plan --show [--format ...]  the stored card or board again (widget = fragment for a visual tool)
   rb.py stats [--format json]       how plans held up: answers to the plan questions, plan vs done
   rb.py check                       validate the map; list the largest shared files to assign
   rb.py own PATH FEATURE|shared [--by a,b|all]   record who owns a shared file (and who uses it)
@@ -851,6 +852,449 @@ def render_html(boards, atl=None):
     return "".join(parts)
 
 
+# ---------------------------------------------------------------- card (the visual "About to change")
+# Claude writes the card (words only); this code checks it, picks the sketches and draws them, so the
+# same plan always gets the same picture.
+MARKS = ("change", "new", "removed", "maybe", "risk")
+LAYER_ORDER = ("screen", "logic", "data", "config", "outside")
+RISK_SOURCES = ("plan", "possible")
+HEDGE_RE = r"(?i)^\W*(risk|risky|may|might|could|possible|possibly|potential|warning|careful)\b"
+SLOTS = [("start", "Before start"), ("merge", "Before merge"), ("release", "Before release")]
+SKETCH_LABEL = {"tree": "Where", "flow": "What happens", "layers": "How deep", "radius": "How far", "before_after": "What moves"}
+KIND_LABEL = {"flow": "behaviour change", "layers": "goes down the stack", "radius": "wide reach",
+              "before_after": "moves things around", "tree": "small change"}
+
+
+def clip(s, n, field, warn):
+    s = " ".join(str(s or "").split())
+    if len(s) > n:
+        warn.append('%s "%s…" is over %d characters; cut.' % (field, s[:24], n))
+        s = s[:n - 1].rstrip() + "…"
+    return s
+
+
+def map_tiles_by_key(m):
+    by = {}
+    for lv in LEVELS:
+        for t in m["levels"][lv]["tiles"]:
+            by.setdefault(t["id"].lower(), t)
+            by.setdefault(t["name"].lower(), t)
+    return by
+
+
+def validate_card(m, card):
+    """Check the card Claude wrote: tiles on the map, known marks and layers, a headline that says
+    what changes. Bad parts are fixed or dropped and named in the warnings, never guessed."""
+    if not isinstance(card, dict):
+        return None, ["the card is not a JSON object; ignored."]
+    warn, by = [], map_tiles_by_key(m)
+    out = {"headline": clip(card.get("headline"), 90, "headline", warn)}
+    if not out["headline"]:
+        warn.append("headline is empty: say in plain words what will change.")
+    elif re.match(HEDGE_RE, out["headline"]):
+        warn.append('headline opens with a risk or hedge ("%s"): lead with the change, put the risk in "risk".' % out["headline"].split()[0])
+
+    def enum(v, allowed, default, field):
+        if v in allowed:
+            return v
+        if v is not None:
+            warn.append('%s "%s" is not one of %s; used "%s".' % (field, v, "|".join(allowed), default))
+        return default
+
+    items = []
+    for it in card.get("items") or []:
+        if not isinstance(it, dict):
+            continue
+        mark = enum(it.get("mark"), MARKS, "change", "mark")
+        layer = enum(it.get("layer"), LAYER_ORDER, "screen", "layer")
+        what = clip(it.get("what"), 32, "item", warn)
+        if it.get("new_tile"):
+            items.append({"tile": None, "name": clip(it["new_tile"], 24, "new_tile", warn), "area": clip(it.get("area"), 24, "area", warn),
+                          "what": what, "mark": mark if mark in ("new", "risk") else "new", "layer": layer})
+            continue
+        t = by.get(str(it.get("tile", "")).lower())
+        if not t:
+            warn.append('item tile "%s" is not on the map; dropped. Use a tile id, or "new_tile" for something new.' % it.get("tile"))
+            continue
+        items.append({"tile": t["id"], "name": t["name"], "area": t.get("area", ""), "what": what, "mark": mark, "layer": layer})
+    out["items"] = items
+
+    r = card.get("risk")
+    out["risk"] = None
+    if isinstance(r, dict) and str(r.get("text") or "").strip():
+        rt = by.get(str(r.get("tile") or "").lower())
+        if r.get("tile") and not rt:
+            warn.append('risk tile "%s" is not on the map; ignored.' % r.get("tile"))
+        out["risk"] = {"text": clip(r["text"], 100, "risk", warn), "source": enum(r.get("source"), RISK_SOURCES, "possible", "risk source"),
+                       "tile": rt["id"] if rt else None}
+
+    out["outside"] = [{"name": clip(o.get("name"), 24, "outside", warn), "what": clip(o.get("what"), 32, "outside", warn)}
+                      for o in (card.get("outside") or [])[:3] if isinstance(o, dict) and o.get("name")]
+
+    f = card.get("flow")
+    if f:
+        steps = [clip(s, 20, "flow step", warn) for s in (f.get("steps") or [])[:3] if str(s).strip()]
+        br = [{"text": clip(b.get("text"), 30, "flow branch", warn), "mark": enum(b.get("mark"), MARKS, "change", "mark")}
+              for b in (f.get("branches") or [])[:4] if isinstance(b, dict) and b.get("text")]
+        if steps and len(br) >= 2:
+            out["flow"] = {"steps": steps, "branches": br}
+        else:
+            warn.append("flow needs at least 1 step and 2 branches; left out.")
+    rc = card.get("reach")
+    if rc:
+        near = [clip(x, 14, "reach", warn) for x in (rc.get("near") or [])[:3]]
+        people = [clip(x, 14, "reach", warn) for x in (rc.get("people") or [])[:3]]
+        if rc.get("core") and (near or people):
+            out["reach"] = {"core": clip(rc["core"], 10, "reach core", warn), "near": near, "people": people}
+        else:
+            warn.append("reach needs a core and some near or people; left out.")
+    ba = card.get("before_after")
+    if ba:
+        def groups(gs):
+            return [[clip(g[0], 20, "before/after", warn), [clip(x, 20, "before/after", warn) for x in (g[1] if len(g) > 1 else [])[:4]]]
+                    for g in (gs or [])[:4] if isinstance(g, (list, tuple)) and g]
+        b, a = groups(ba.get("before")), groups(ba.get("after"))
+        if b and a:
+            out["before_after"] = {"before": b, "after": a}
+        else:
+            warn.append("before_after needs both before and after; left out.")
+
+    acts_in = card.get("acts") if isinstance(card.get("acts"), dict) else {}
+    out["acts"] = {k: clip(acts_in.get(k), 80, "acts." + k, warn) for k, _ in SLOTS if acts_in.get(k)}
+    # A guessed risk never stands as a claim: it becomes a question for the author before work starts
+    if out["risk"] and out["risk"]["source"] == "possible" and not out["acts"].get("start"):
+        out["acts"]["start"] = clip("Ask the author: " + out["risk"]["text"].rstrip(".") + "?", 80, "acts.start", [])
+    return out, warn
+
+
+def card_digest(card):
+    return hashlib.sha1(json.dumps(card, sort_keys=True).encode()).hexdigest()[:12]
+
+
+def card_tiles(run):
+    """Keys of everything the card draws: planned and maybe feature tiles, item tiles, new tiles."""
+    c = run.get("card") or {}
+    keys = list((run.get("expected") or {}).get("features", []))
+    for it in c.get("items", []):
+        keys.append(it["tile"] or "new:" + it["name"])
+    keys += (run.get("maybe") or {}).get("features", [])
+    seen = []
+    for k in keys:
+        if k not in seen:
+            seen.append(k)
+    return seen
+
+
+def pick_sketches(m, card, keys):
+    """Tree always. Then sketches the card has data for (flow, before/after, reach), then ones its
+    items imply (layers when it goes down the stack, a radius when it spreads). Severity sets how many."""
+    by = {t["id"]: t for lv in LEVELS for t in m["levels"][lv]["tiles"]}
+    layers = {i["layer"] for i in card["items"]}
+    r = card.get("risk")
+    if any(by.get(k, {}).get("risk") == "high" for k in keys) or (r and r["source"] == "plan" and card.get("reach", {}).get("people")):
+        sev = "high"
+    elif not r and len(keys) <= 1 and layers <= {"screen"} and not card.get("outside"):
+        sev = "low"
+    else:
+        sev = "medium"
+    cands = [s for s, k in (("flow", "flow"), ("before_after", "before_after"), ("radius", "reach")) if card.get(k)]
+    if len(layers) >= 2 or layers & {"data", "config", "outside"} or card.get("outside"):
+        cands.append("layers")
+    if len(keys) >= 3 and "radius" not in cands:
+        cands.append("radius")
+    return sev, ["tree"] + cands[:{"low": 0, "medium": 1, "high": 2}[sev]]
+
+
+def card_model(m, run):
+    card = run["card"]
+    keys = card_tiles(run)
+    sev, sk = pick_sketches(m, card, keys)
+    return dict(card, product=m.get("product", "") or "Product", keys=keys, severity=sev, sketches=sk,
+                kind=KIND_LABEL[sk[1] if len(sk) > 1 else "tree"], tree=tree_nodes(m, run))
+
+
+def tree_nodes(m, run):
+    """The pruned tree as (depth, label, mark) rows: product > area > tile > items. Only what the plan
+    touches; the rest of the map is never drawn."""
+    card, by = run["card"], {t["id"]: t for lv in LEVELS for t in m["levels"][lv]["tiles"]}
+    maybe = set((run.get("maybe") or {}).get("features", []))
+    risk_tile = (card.get("risk") or {}).get("tile")
+    groups = {}
+    for k in card_tiles(run):
+        t = by.get(k)
+        groups[k] = {"name": t["name"] if t else k[4:], "area": (t or {}).get("area", ""), "items": [], "maybe": k in maybe}
+    for it in card["items"]:
+        g = groups[it["tile"] or "new:" + it["name"]]
+        g["items"].append(it)
+        g["area"] = g["area"] or it.get("area", "")
+    areas = {}
+    for k, g in groups.items():
+        areas.setdefault(g["area"], []).append(k)
+    rows = [(0, run.get("product") or m.get("product", "") or "Product", "root")]
+    for area, ks in areas.items():
+        d = 1
+        if area:
+            rows.append((1, area, "area"))
+            d = 2
+        for k in ks:
+            g, risky = groups[k], k == risk_tile
+            its = g["items"]
+            if not its:
+                rows.append((d, g["name"] + (" · maybe" if g["maybe"] else " · will change"), "maybe" if g["maybe"] else ("risk" if risky else "change")))
+            elif len(its) == 1:
+                it = its[0]
+                rows.append((d, g["name"] + (" · " + it["what"] if it["what"] else ""), "risk" if risky and it["mark"] == "change" else it["mark"]))
+            else:
+                rows.append((d, g["name"], "group-risk" if risky else "group"))
+                rows += [(d + 1, it["what"] or it["layer"], it["mark"]) for it in its]
+    if card.get("outside"):
+        rows.append((1, "Outside the repo", "area"))
+        rows += [(2, o["name"] + (" · " + o["what"] if o["what"] else ""), "outside") for o in card["outside"]]
+    return rows
+
+
+# Colours are the host's (the Claude app's visual tool sets these variables), with light fallbacks.
+def V(name, fallback):
+    return "var(--%s, %s)" % (name, fallback)
+
+
+INK, SEC, MUT = V("text-primary", "#1f1e1d"), V("text-secondary", "#5f5e5a"), V("text-muted", "#888780")
+LINE, LINE2 = V("border", "#d3d1c7"), V("border-strong", "#b4b2a9")
+# mark: (fill, stroke, text, dash, strike)
+MARK_STYLE = {
+    "change": ("none", LINE2, INK, "", False),
+    "new": (V("bg-success", "#eaf3de"), V("border-success", "#97c459"), V("text-success", "#3b6d11"), "", False),
+    "removed": ("none", "none", V("text-danger", "#a32d2d"), "", True),
+    "maybe": ("none", LINE2, SEC, "2 3", False),
+    "risk": (V("bg-warning", "#faeeda"), V("border-warning", "#ef9f27"), V("text-warning", "#854f0b"), "", False),
+    "outside": (V("bg-accent", "#e6f1fb"), V("border-accent", "#85b7eb"), V("text-accent", "#185fa5"), "3 3", False),
+}
+WARN_TX = MARK_STYLE["risk"][2]
+
+
+def tw(s, size=12):
+    """Rough text width in px for the sans font (good enough to size boxes)."""
+    return int(len(s) * size * 0.5) + 18
+
+
+def sv_text(x, y, s, fill, size=12, weight=400, anchor="start", strike=False):
+    return '<text x="%d" y="%d" style="fill:%s;font-size:%dpx;font-weight:%d" text-anchor="%s"%s>%s</text>' % (
+        x, y, fill, size, weight, anchor, ' text-decoration="line-through"' if strike else "", html.escape(s))
+
+
+def sv_box(x, y, w, s, mark, size=12):
+    fill, stroke, text, dash, strike = MARK_STYLE.get(mark, MARK_STYLE["change"])
+    if strike:
+        return sv_text(x + 8, y + 15, s, text, size, strike=True)
+    return ('<rect x="%d" y="%d" width="%d" height="22" rx="5" style="fill:%s;stroke:%s"%s/>' % (
+        x, y, w, fill, stroke, ' stroke-dasharray="%s"' % dash if dash else "") + sv_text(x + 8, y + 15, s, text, size))
+
+
+def sv(w, h, body, label):
+    return ('<svg viewBox="0 0 %d %d" width="100%%" role="img" aria-label="%s" style="display:block;max-width:%dpx">%s</svg>'
+            % (w, h, html.escape(label), w, body))
+
+
+def sk_tree(c):
+    rows, out, last, y = c["tree"], [], {}, 6
+    for d, label, mark in rows:
+        x = 6 + d * 22
+        if d:
+            px, py = last[d - 1]
+            out.append('<path d="M%d %d V%d H%d" style="fill:none;stroke:%s"/>' % (px + 8, py + 20, y + 11, x, LINE2))
+        if mark in ("root", "area", "group", "group-risk"):
+            out.append(sv_text(x, y + 15, label, WARN_TX if mark == "group-risk" else INK, 14 if d == 0 else 13, 500 if d == 0 else 400))
+        else:
+            out.append(sv_box(x, y, tw(label), label, mark))
+        last[d] = (x, y)
+        y += 28
+    w = max([6 + d * 22 + tw(l) for d, l, _ in rows] + [200]) + 6
+    return sv(w, y + 2, "".join(out), "Where it changes")
+
+
+def layer_rows(c):
+    """screen shows tile names; deeper layers show what changes there."""
+    rows = []
+    for ly in LAYER_ORDER:
+        boxes, seen = [], set()
+        for it in c["items"]:
+            if it["layer"] != ly:
+                continue
+            label = it["name"] if ly == "screen" else (it["what"] or it["name"])
+            mark = "risk" if it["mark"] == "risk" or (ly == "screen" and it["tile"] == (c.get("risk") or {}).get("tile")) else it["mark"]
+            if label not in seen:
+                seen.add(label)
+                boxes.append((label, mark))
+        if ly == "outside":
+            boxes += [(o["name"], "outside") for o in c.get("outside", [])]
+        rows.append((ly, boxes))
+    return rows
+
+
+def sk_layers(c):
+    out, y = [], 4
+    for ly, boxes in layer_rows(c):
+        out.append(sv_text(4, y + 15, ly.title(), SEC, 11))
+        x = 66
+        if not boxes:
+            out.append(sv_text(66, y + 15, "untouched", MUT, 11))
+        for label, mark in boxes[:4]:
+            out.append(sv_box(x, y, tw(label), label, mark))
+            x += tw(label) + 8
+        y += 30
+        out.append('<path d="M62 %d H340" style="stroke:%s"/>' % (y - 4, LINE))
+    return sv(340, y, "".join(out), "How deep it goes")
+
+
+def sk_flow(c):
+    f = c["flow"]
+    br = f["branches"]
+    cy, x, out = len(br) * 15 - 4, 4, []
+    for i, s in enumerate(f["steps"]):
+        w = tw(s)
+        out.append(sv_box(x, cy, w, s, "change"))
+        if i < len(f["steps"]) - 1:
+            out.append('<path d="M%d %d H%d" style="stroke:%s"/>' % (x + w, cy + 11, x + w + 12, SEC))
+        x += w + 12
+    bx = x + 14
+    bw = max([tw(b["text"]) for b in br])
+    for i, b in enumerate(br):
+        y = 4 + i * 30
+        out.append('<path d="M%d %d L%d %d" style="fill:none;stroke:%s"/>' % (x - 12, cy + 11, bx, y + 11, SEC))
+        out.append(sv_box(bx, y, bw, b["text"], b["mark"]))
+    return sv(bx + bw + 4, len(br) * 30 + 6, "".join(out), "What happens")
+
+
+def sk_radius(c):
+    rc = c.get("reach") or {}
+    if not rc:  # implied by a wide change: the riskiest tile in the middle, the others around it
+        names = [g for d, g, mk in c["tree"] if mk not in ("root", "area", "group", "group-risk", "outside")]
+        names = [n.split(" · ")[0] for n in names]
+        core = next((n.split(" · ")[0] for d, n, mk in c["tree"] if mk in ("risk", "group-risk")), names[0] if names else "Change")
+        rc = {"core": core[:10], "near": [n[:14] for n in names if n != core][:3], "people": []}
+    out = ['<circle cx="170" cy="92" r="76" style="fill:none;stroke:%s" stroke-dasharray="3 4"/>' % LINE if rc["people"] else "",
+           '<circle cx="170" cy="92" r="56" style="fill:none;stroke:%s"/>' % LINE2,
+           '<circle cx="170" cy="92" r="27" style="fill:%s;stroke:%s"/>' % MARK_STYLE["risk"][:2],
+           sv_text(170, 96, rc["core"], WARN_TX, 11, anchor="middle")]
+    for (x, y), s in zip([(170, 50), (228, 96), (112, 96)], rc["near"]):
+        out.append(sv_text(x, y, s, INK, 11, anchor="middle"))
+    for (x, y), s in zip([(170, 11), (282, 170), (58, 170)], rc["people"]):
+        out.append(sv_text(x, y, s, SEC, 11, anchor="middle"))
+    return sv(340, 184, "".join(out), "How far it reaches")
+
+
+def sk_before_after(c):
+    ba, out = c["before_after"], []
+    out.append(sv_text(4, 14, "Before", SEC, 11) + sv_text(184, 14, "After", SEC, 11))
+    out.append('<path d="M150 60 H170 M165 55 L170 60 L165 65" style="fill:none;stroke:%s"/>' % SEC)
+
+    def col(groups, x0):
+        y = 24
+        for g, kids in groups:
+            out.append(sv_text(x0, y + 15, g, INK, 13))
+            y += 26
+            for k in kids:
+                out.append(sv_text(x0 + 16, y + 15, k, INK, 12))
+                y += 24
+        return y
+    h = max(col(ba["before"], 4), col(ba["after"], 184))
+    return sv(340, h + 4, "".join(out), "What moves")
+
+
+SKETCHES = {"tree": sk_tree, "layers": sk_layers, "flow": sk_flow, "radius": sk_radius, "before_after": sk_before_after}
+
+
+def render_card_widget(c):
+    """A fragment for the host's visual tool: no page wrapper, host colours, transparent background."""
+    r = c.get("risk")
+    tag = {"plan": "from plan", "possible": "possible"}
+    risk = (('<p style="margin:0 0 10px;font-size:14px;color:%s">Risk: %s <span style="font-size:11px;padding:0 7px;border-radius:6px;background:%s">%s</span></p>'
+             % (WARN_TX, html.escape(r["text"]), MARK_STYLE["risk"][0], tag[r["source"]])) if r else
+            '<p style="margin:0 0 10px;font-size:13px;color:%s">No risk found</p>' % MUT)
+    sk = "".join('<div style="min-width:0"><p style="margin:0 0 4px;font-size:11px;color:%s">%s</p>%s</div>' % (MUT, SKETCH_LABEL[s], SKETCHES[s](c))
+                 for s in c["sketches"])
+    slots = "".join('<div style="display:grid;grid-template-columns:110px 1fr;gap:8px;font-size:13px;padding:5px 0;border-top:0.5px solid %s">'
+                    '<span style="color:%s">%s</span><span>%s</span></div>' % (LINE, SEC, name, html.escape(c["acts"][k]))
+                    for k, name in SLOTS if c["acts"].get(k))
+    return ('<div class="readback-card" style="position:relative;font-family:%s;color:%s;border:0.5px solid %s;border-radius:12px;padding:16px 18px">'
+            '<h2 style="position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);margin:0">About to change: %s</h2>'
+            '<p style="margin:0 0 4px;font-size:12px;color:%s">Readback · %s · About to change · %s · %s</p>'
+            '<p style="margin:0 0 4px;font-size:17px;font-weight:500;line-height:1.4">%s</p>%s'
+            '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:14px;margin:0 0 10px">%s</div>%s</div>'
+            % (V("font-sans", "system-ui, sans-serif"), INK, LINE, html.escape(c["headline"]), SEC, html.escape(c["product"]), c["severity"], c["kind"],
+               html.escape(c["headline"]), risk, sk, slots))
+
+
+PAGE_VARS = {
+    "light": "--text-primary:#1f1e1d;--text-secondary:#5f5e5a;--text-muted:#888780;--border:#d3d1c7;--border-strong:#b4b2a9;"
+             "--bg-warning:#faeeda;--border-warning:#ef9f27;--text-warning:#854f0b;--bg-success:#eaf3de;--border-success:#97c459;"
+             "--text-success:#3b6d11;--bg-accent:#e6f1fb;--border-accent:#85b7eb;--text-accent:#185fa5;--text-danger:#a32d2d;--page:#faf9f6",
+    "dark": "--text-primary:#efeee9;--text-secondary:#b4b2a9;--text-muted:#888780;--border:#444441;--border-strong:#5f5e5a;"
+            "--bg-warning:#412402;--border-warning:#854f0b;--text-warning:#fac775;--bg-success:#173404;--border-success:#3b6d11;"
+            "--text-success:#c0dd97;--bg-accent:#042c53;--border-accent:#185fa5;--text-accent:#b5d4f4;--text-danger:#f09595;--page:#171716",
+}
+
+
+def render_card_html(c):
+    css = (":root{%s}@media (prefers-color-scheme:dark){:root:not([data-theme=light]){%s}}:root[data-theme=dark]{%s}"
+           "body{margin:0;background:var(--page);font:15px/1.55 system-ui,-apple-system,Segoe UI,sans-serif}"
+           "main{max-width:880px;margin:0 auto;padding:24px 16px 64px}" % (PAGE_VARS["light"], PAGE_VARS["dark"], PAGE_VARS["dark"]))
+    return ('<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">'
+            "<title>Readback plan</title><style>" + css + "</style></head><body><main>" + render_card_widget(c) + "</main></body></html>")
+
+
+TERM_MARK = {"new": " (new)", "removed": " (removed)", "risk": "  ⚠", "group-risk": "  ⚠"}
+
+
+def render_card_term(c, width=80):
+    r = c.get("risk")
+    L = [("Readback · " + c["product"] + " · About to change · " + c["severity"] + " · " + c["kind"])[:width]]
+    L += wrap(c["headline"], width)
+    L += wrap("Risk: " + r["text"] + " (" + {"plan": "from plan", "possible": "possible"}[r["source"]] + ")", width) if r else ["No risk found"]
+    L.append("")
+    rows = c["tree"]
+    for i, (d, label, mark) in enumerate(rows):
+        if d == 0:
+            L.append(label)
+            continue
+        pre = ""
+        for lv in range(1, d):  # a bar where an ancestor at that depth still has siblings below
+            pre += "   " if not more_at(rows, i, lv) else "│  "
+        pre += "├─ " if more_at(rows, i, d) else "└─ "
+        L.append((pre + label + TERM_MARK.get(mark, ""))[:width])
+    lines = {
+        "flow": lambda: "What happens: " + " → ".join(c["flow"]["steps"]) + " → " + " | ".join(b["text"] for b in c["flow"]["branches"]),
+        "layers": lambda: "How deep: " + " · ".join(ly + " " + ", ".join(l for l, _ in bx) for ly, bx in layer_rows(c) if bx),
+        "radius": lambda: "How far: " + (c["reach"]["core"] + " → " + ", ".join(c["reach"]["near"]) +
+                                         (" → " + ", ".join(c["reach"]["people"]) if c["reach"]["people"] else "") if c.get("reach") else "several features at once"),
+        "before_after": lambda: "What moves: " + " · ".join(g + " {" + ", ".join(k) + "}" for g, k in c["before_after"]["before"]) +
+                                " → " + " · ".join(g + " {" + ", ".join(k) + "}" for g, k in c["before_after"]["after"]),
+    }
+    extra = [s for s in c["sketches"][1:]]
+    if extra:
+        L.append("")
+        for s in extra:
+            for j, line in enumerate(wrap(lines[s](), width - 2)):
+                L.append(("" if j == 0 else "  ") + line)
+    acts = [(name, c["acts"][k]) for k, name in SLOTS if c["acts"].get(k)]
+    if acts:
+        L.append("")
+        for name, txt in acts:
+            for j, line in enumerate(wrap(txt, width - 18)):
+                L.append(("  " + (name if j == 0 else "").ljust(16) + line).rstrip())
+    return "\n".join(L)
+
+
+def more_at(rows, i, depth):
+    """True if a later row sits at this depth before the tree climbs above it."""
+    for d, _, _ in rows[i + 1:]:
+        if d < depth:
+            return False
+        if d == depth:
+            return True
+    return False
+
+
 def plural(n, w):
     return str(n) + " " + w + ("" if n == 1 else "s")
 
@@ -914,6 +1358,9 @@ def record_plan(root, m, text, source, tiles=None, maybe=None):
         run["mapped"] = tiles is not None
         if tiles is None:
             run.pop("draft", None)
+    if tiles is None:  # a new plan or opening prompt: the old card no longer describes it
+        for k in ("card", "card_shown", "card_nudged"):
+            run.pop(k, None)
     save_run(root, run)
     return run
 
@@ -1279,7 +1726,7 @@ def plan_boards(m, run):
 
 
 def cmd_plan(argv):
-    """rb.py plan --tiles a,b [--maybe c,d] [--source plan|pr] [--format term|html|json] [--out FILE]
+    """rb.py plan --tiles a,b [--maybe c,d] [--source plan|pr] [--card FILE|-] [--format term|widget|html|json] [--out FILE]
                                                 Claude's mapping of the plan; prints the 'About to change' board
        rb.py plan --show [--format ...]         the stored "About to change" board again
        rb.py plan TEXT|-                        store the text; Claude still has to map it"""
@@ -1308,10 +1755,39 @@ def cmd_plan(argv):
             else:
                 run.pop("answered", None)
         boards = plan_boards(m, run)
+        cf = args_get(argv, "--card")
+        if cf is not None:
+            try:
+                raw = json.loads(sys.stdin.read() if cf == "-" else open(cf, encoding="utf-8").read())
+            except (OSError, ValueError) as e:
+                raw = None
+                sys.stderr.write("Readback: could not read the card (%s); showing the board without it.\n" % e)
+            card, warn = validate_card(m, raw) if raw is not None else (None, [])
+            if warn:
+                sys.stderr.write("Readback card: fix these and run again if they matter:\n" + "".join("  - " + w + "\n" for w in warn))
+            if card:
+                run["card"] = card
+        elif tl is not None and prev.get("card"):
+            run["card"] = prev["card"]  # a rerun with the final tile list keeps the card
         if tl is not None:
             note_plan(root, prev, run, boards[0].get("couples", []))
+        if tl is not None or cf is not None:
             save_run(root, run)
         fmt = args_get(argv, "--format", "term")
+        if run.get("card"):
+            c = card_model(m, run)
+            if fmt == "json":
+                print(json.dumps(c, indent=1, ensure_ascii=False))
+            elif fmt == "html":
+                write_out(render_card_html(c), args_get(argv, "--out"))
+            else:
+                print(render_card_widget(c) if fmt == "widget" else render_card_term(c))
+                if fmt != "widget":
+                    sys.stderr.write("Readback: if you have a visual tool (show_widget), run " + rb_cmd() +
+                                     " plan --show --format widget and pass its output to it unchanged.\n")
+                run["card_shown"] = card_digest(run["card"])
+                save_run(root, run)
+            return
         if fmt == "json":
             print(json.dumps(boards[0], indent=1))
         elif fmt == "html":
@@ -1324,6 +1800,21 @@ def cmd_plan(argv):
     print(map_request(m))
 
 
+def rb_cmd():
+    return "\"" + sys.executable.replace(os.sep, "/") + "\" \"" + os.path.abspath(__file__).replace(os.sep, "/") + "\""
+
+
+CARD_SCHEMA = ('{"headline": "the change in plain words, max 90 chars, no risk or hedge word first", '
+               '"risk": {"text": "one risk naming its subject", "source": "plan|possible", "tile": "id"} or null, '
+               '"items": [{"tile": "id" or "new_tile": "Name", "area": "for new_tile", "what": "<=32 chars", '
+               '"mark": "change|new|removed|maybe|risk", "layer": "screen|logic|data|config|outside"}], '
+               '"outside": [{"name": "Bank", "what": "<=32 chars"}], '
+               '"flow": {"steps": ["Pay", "Bank"], "branches": [{"text": "OK: done", "mark": "change"}, {"text": "Timeout: retry", "mark": "risk"}]}, '
+               '"reach": {"core": "Retry", "near": ["Orders"], "people": ["Buyers"]}, '
+               '"before_after": {"before": [["Checkout", ["Cart list"]]], "after": [["Cart", ["Cart list"]]]}, '
+               '"acts": {"start": "", "merge": "who checks what", "release": ""}}')
+
+
 def map_request(m, source="plan"):
     what = ("map this plan to the product map before editing. Pick only the tiles the plan says it will change "
             "(features and parts; leave out anything it does not ask for)." if source == "plan" else
@@ -1331,10 +1822,13 @@ def map_request(m, source="plan"):
             "(features and parts; only what the user asked for).")
     return ("Readback: " + what + " Put tiles you are sure of in --tiles and "
             "tiles you are only partly sure of in --maybe:\n" + tile_list(m) +
-            "\nThen run: \"" + sys.executable.replace(os.sep, "/") + "\" \"" + os.path.abspath(__file__) + "\" plan --tiles id1,id2 --maybe id3" +
-            (" --source intent" if source == "intent" else "") + "  "
-            "and show the user the 'About to change' board it prints, unchanged (every line), in a code block. If it has maybe tiles or a "
-            "'usually changes with' question, ask the user once which to include, then run plan --tiles again "
+            "\nAlso write the 'About to change' card as JSON (leave out flow, reach, before_after or acts when they don't apply; "
+            "risk source is 'plan' only when the plan itself says it): " + CARD_SCHEMA +
+            "\nThen run, with the card on stdin (a heredoc):  " + rb_cmd() + " plan --tiles id1,id2 --maybe id3" +
+            (" --source intent" if source == "intent" else "") + " --card -  "
+            "If you have a visual tool (show_widget), then run " + rb_cmd() + " plan --show --format widget and pass its output to it "
+            "unchanged; otherwise show the user the card it printed, unchanged (every line), in a code block. Never redraw or trim it. "
+            "If it has maybe tiles or a 'usually changes with' question, ask the user once which to include, then run plan --tiles again "
             "with the final list (no --maybe" + (", same --source" if source == "intent" else "") + ") before editing. Otherwise carry on.")
 
 
@@ -1409,6 +1903,16 @@ def hook_done():
     os.chdir(root)
     m = load_map(root)
     if not m:
+        return
+    run = load_run(root)
+    card = run.get("card")
+    if card and card_digest(card) not in (run.get("card_shown"), run.get("card_nudged")):
+        # Hooks can't call the visual tool; stopping once makes Claude show the card before it finishes
+        run["card_nudged"] = card_digest(card)
+        save_run(root, run)
+        print(json.dumps({"decision": "block", "reason": "Readback: the 'About to change' card is ready but was not shown. If you have a "
+                          "visual tool (show_widget), run " + rb_cmd() + " plan --show --format widget and pass its output to it unchanged; "
+                          "otherwise run " + rb_cmd() + " plan --show and paste it unchanged in a code block. Then finish."}))
         return
     files = diff_files()
     if not files:

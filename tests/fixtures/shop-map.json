@@ -1,0 +1,23 @@
+{
+ "version": 1,
+ "product": "Shop app",
+ "levels": {
+  "features": {"tiles": [
+   {"id": "product_page", "name": "Product page", "area": "Catalog", "owns": ["src/catalog/product*"], "risk": "normal", "money": false, "owner": ""},
+   {"id": "settings", "name": "Settings", "area": "Account", "owns": ["src/account/settings*"], "risk": "normal", "money": false, "owner": ""},
+   {"id": "profile", "name": "Profile", "area": "Account", "owns": ["src/account/profile*"], "risk": "normal", "money": false, "owner": ""},
+   {"id": "login", "name": "Login", "area": "Account", "owns": ["src/account/login*"], "risk": "high", "money": false, "owner": "security"},
+   {"id": "banner", "name": "Banner", "area": "Home", "owns": ["src/home/banner*"], "risk": "normal", "money": false, "owner": ""},
+   {"id": "prices", "name": "Prices", "area": "Checkout", "owns": ["src/checkout/price*"], "risk": "normal", "money": true, "owner": ""},
+   {"id": "checkout", "name": "Checkout page", "area": "Checkout", "owns": ["src/checkout/page*"], "risk": "normal", "money": true, "owner": ""},
+   {"id": "card_charge", "name": "Card charge", "area": "Payments", "owns": ["src/payments/**"], "risk": "high", "money": true, "owner": "payments"},
+   {"id": "confirmation", "name": "Confirmation", "area": "Orders", "owns": ["src/orders/confirm*"], "risk": "normal", "money": false, "owner": ""},
+   {"id": "reports", "name": "Reports", "area": "Admin", "owns": ["src/admin/reports*"], "risk": "normal", "money": false, "owner": ""},
+   {"id": "date_library", "name": "Date library", "area": "Shared", "owns": ["src/shared/dates*"], "risk": "normal", "money": false, "owner": ""}
+  ]},
+  "parts": {"tiles": [
+   {"id": "web", "name": "Web", "owns": ["src/**"], "risk": "normal", "money": false, "owner": ""}
+  ]}
+ },
+ "roles": {"engineer": {"home": ["parts", "change"], "acts_on": ["risk"]}, "pm": {"home": ["features", "change"], "acts_on": ["unplanned"]}}
+}
