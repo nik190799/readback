@@ -1,5 +1,8 @@
 # Readback
 
+[![tests](https://github.com/nik190799/readback/actions/workflows/tests.yml/badge.svg?branch=main)](https://github.com/nik190799/readback/actions/workflows/tests.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
+
 See a code change as a product picture, not a diff.
 
 Readback reads your git diff and a small map of your product (`.readback/map.json`) and draws a
